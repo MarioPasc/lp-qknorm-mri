@@ -1,0 +1,87 @@
+"""Compound segmentation loss for binary stroke lesion segmentation.
+
+Combines binary cross-entropy with logits and soft Dice loss in a weighted
+sum.  The BCE component supports ``pos_weight`` to address class imbalance
+(lesion voxels are a small fraction of each slice).
+
+Mathematical specification::
+
+    L = w_bce * BCE(logits, target) + w_dice * DiceLoss(logits, target)
+
+where ``DiceLoss`` is MONAI's implementation with ``sigmoid=True`` applied
+internally to the raw logits.
+
+References
+----------
+- Isensee et al. *nnU-Net*. Nat. Methods 2021.
+  doi:10.1038/s41592-020-01008-z (loss convention).
+"""
+
+from __future__ import annotations
+
+import logging
+
+import torch.nn as nn
+from monai.losses import DiceLoss  # type: ignore[attr-defined]
+from torch import Tensor
+
+
+logger = logging.getLogger(__name__)
+
+
+class CompoundSegLoss(nn.Module):
+    """Weighted BCE-with-logits + soft Dice loss for binary segmentation.
+
+    Parameters
+    ----------
+    bce_weight : float
+        Weight for the BCE component.  Default ``0.5``.
+    dice_weight : float
+        Weight for the Dice component.  Default ``0.5``.
+    pos_weight : Tensor or None
+        Positive-class weight tensor for ``BCEWithLogitsLoss`` (addresses
+        class imbalance).  Shape ``()`` scalar or ``(1,)``.  Computed from
+        the training set at ``DataModule.setup()`` time.
+
+    Notes
+    -----
+    ``DiceLoss`` is configured with ``sigmoid=True`` so it applies sigmoid
+    to raw logits internally.  ``BCEWithLogitsLoss`` also applies sigmoid
+    internally.  Both losses expect raw logit inputs.
+    """
+
+    def __init__(
+        self,
+        bce_weight: float = 0.5,
+        dice_weight: float = 0.5,
+        pos_weight: Tensor | None = None,
+    ) -> None:
+        super().__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.dice = DiceLoss(sigmoid=True, smooth_nr=1e-5, smooth_dr=1e-5)
+
+    def forward(self, logits: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Compute the compound loss.
+
+        Parameters
+        ----------
+        logits : Tensor
+            Raw unnormalized predictions, shape ``(B, 1, H, W)``.
+        target : Tensor
+            Binary ground-truth masks, shape ``(B, 1, H, W)``, float.
+
+        Returns
+        -------
+        loss_total : Tensor
+            Scalar.  Weighted sum of BCE and Dice.
+        loss_bce : Tensor
+            Scalar.  BCE component (before weighting).
+        loss_dice : Tensor
+            Scalar.  Dice component (before weighting).
+        """
+        loss_bce = self.bce(logits, target)
+        loss_dice = self.dice(logits, target)
+        loss_total = self.bce_weight * loss_bce + self.dice_weight * loss_dice
+        return loss_total, loss_bce, loss_dice

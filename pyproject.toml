@@ -173,6 +173,7 @@ module = [
     "h5py.*",
     "hydra.*",
     "omegaconf.*",
+    "pandas.*",
     "pytorch_lightning.*",
     "lightning.*",
     "torchmetrics.*",

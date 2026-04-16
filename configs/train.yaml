@@ -1,0 +1,12 @@
+defaults:
+  - training: default
+  - model: default
+  - _self_
+
+experiment: "p_sweep_v1"
+run_dir: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/results/p_sweep_v1"
+
+data:
+  cache_root: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/data"
+  fold: 0
+  use_mock: false

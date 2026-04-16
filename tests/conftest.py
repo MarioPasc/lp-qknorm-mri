@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
+from lpqknorm.data.datamodule import MockAtlasDataModule, MockDataConfig
 from lpqknorm.models.lp_qknorm import LpQKNormConfig
+from lpqknorm.training.module import ModelConfig, TrainingConfig
 
 
 @pytest.fixture(params=[1.5, 2.0, 2.5, 3.0, 4.0, 8.0])
@@ -44,3 +46,37 @@ def model_kwargs() -> dict[str, object]:
         "out_channels": 2,
         "feature_size": 24,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tiny_datamodule() -> MockAtlasDataModule:
+    """Tiny MockAtlasDataModule for fast integration tests."""
+    cfg = MockDataConfig(
+        n_train=8,
+        n_val=8,
+        n_test=4,
+        img_size=(224, 224),
+        n_subjects=4,
+        seed=0,
+        batch_size=2,
+    )
+    dm = MockAtlasDataModule(cfg)
+    dm.setup("fit")
+    return dm
+
+
+@pytest.fixture
+def tiny_model_cfg() -> ModelConfig:
+    """Minimal ModelConfig (feature_size=12) for fast tests."""
+    return ModelConfig(feature_size=12, out_channels=1)
+
+
+@pytest.fixture
+def tiny_training_cfg() -> TrainingConfig:
+    """TrainingConfig suitable for CPU-based tests."""
+    return TrainingConfig(lr=1e-3, max_epochs=2, patience=5, precision="32")

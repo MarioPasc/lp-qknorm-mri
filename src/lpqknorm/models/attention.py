@@ -373,6 +373,7 @@ class LpWindowAttention(nn.Module):
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1
         ).contiguous()  # (num_heads, n, n)
+        self._capture["relative_position_bias"] = relative_position_bias.unsqueeze(0)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         # ------------------------------------------------------------------ #

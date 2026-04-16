@@ -14,9 +14,7 @@
 - [x] `.claude/commands/test-and-verify.md` — full verification pipeline
 - [x] `.claude/hooks/compact-context.sh` — context recovery after compaction
 - [x] `docs/` — all five phase specifications written
-- [ ] `environment.yml` — conda environment definition
-- [ ] `.pre-commit-config.yaml` — ruff, mypy, nbstripout hooks
-- [ ] Install editable package (`pip install -e ".[dev]"`)
+- [X] Install editable package (`pip install -e ".[dev]"`)
 
 ## Phase 1 — Data Pipeline
 - [ ] `src/lpqknorm/utils/exceptions.py`
@@ -33,13 +31,13 @@
 - [ ] `tests/fixtures/synthetic_atlas.py`
 
 ## Phase 2 — Model
-- [ ] `src/lpqknorm/models/lp_qknorm.py`
-- [ ] `src/lpqknorm/models/attention.py`
-- [ ] `src/lpqknorm/models/swin_unetr_lp.py`
-- [ ] `src/lpqknorm/models/hooks.py`
-- [ ] `tests/unit/test_lp_qknorm.py`
-- [ ] `tests/unit/test_attention_equivalence.py`
-- [ ] `tests/integration/test_forward_pass.py`
+- [X] `src/lpqknorm/models/lp_qknorm.py`
+- [X] `src/lpqknorm/models/attention.py`
+- [X] `src/lpqknorm/models/swin_unetr_lp.py`
+- [X] `src/lpqknorm/models/hooks.py`
+- [X] `tests/unit/test_lp_qknorm.py`
+- [X] `tests/unit/test_attention_equivalence.py`
+- [X] `tests/integration/test_forward_pass.py`
 
 ## Phase 3 — Training
 - [ ] `src/lpqknorm/training/module.py`

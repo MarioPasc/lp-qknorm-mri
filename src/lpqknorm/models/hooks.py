@@ -113,6 +113,7 @@ class AttentionCapture:
     logits: Tensor | None = None
     attention: Tensor | None = None
     alpha: Tensor | None = None
+    relative_position_bias: Tensor | None = None
     stage_index: int = -1
     block_index: int = -1
 
@@ -307,6 +308,9 @@ class AttentionHookRegistry:
                 logits=_safe_detach_clone(raw.get("logits")),
                 attention=_safe_detach_clone(raw.get("attention")),
                 alpha=_safe_detach_clone(raw.get("alpha")),
+                relative_position_bias=_safe_detach_clone(
+                    raw.get("relative_position_bias")
+                ),
                 stage_index=int(raw.get("stage_index", -1)),
                 block_index=int(raw.get("block_index", -1)),
             )
