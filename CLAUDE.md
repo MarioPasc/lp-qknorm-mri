@@ -1,0 +1,241 @@
+# Lp-QKNorm for Small-Lesion Segmentation — Agent Instructions
+
+## Project Identity
+
+This repository implements a **mechanistic study** of generalized Lp query-key
+normalization inside windowed self-attention for 2D stroke-lesion segmentation
+on ATLAS v2.0. It is **not** a new segmentation method — it is a controlled
+experiment isolating the effect of the Lp norm parameter `p` on attention
+concentration for small lesions.
+
+- **Author:** Mario Pascual González (Health Engineering / Bioinformatics, UMA)
+- **Research group:** Grupo de Inteligencia Computacional y Análisis de Imagen (GIC-AIA), UMA
+- **Clinical collaborator:** IBIMA-BIONAND
+- **License:** MIT
+- **Dataset:** ATLAS v2.0 (Liew et al., Scientific Data 2022)
+- **Architecture:** 2D Swin-UNETR (MONAI) with patched windowed attention
+
+## Scientific Hypothesis
+
+For lesions whose query/key representations develop peaky coordinate
+distributions, higher `p` increases the logit gap between lesion-aligned and
+background keys. The predicted mechanistic chain is:
+
+> higher feature peakiness (Probe 1) → lower per-query attention entropy
+> (Probe 2) → more attention mass on lesion tokens (Probe 3) → larger logit
+> gap (Probe 4) → tighter attention–mask spatial alignment (Probe 5) → higher
+> small-lesion recall (headline metric).
+
+The toy-model prediction is `Δ(p) = s^{1 − 2/p}[1 − (s/d_k)^{1/p}]` with an
+interior maximum at `p* > 2`.
+
+### Critical Constraint
+
+This is a **representation/normalization study**, not a new architecture. The
+only modification to stock Swin-UNETR is the Q-K normalization inside
+`WindowAttention`. Everything else (patch embedding, relative position bias,
+skip connections, decoder) must remain architecturally identical. Any code or
+text that frames this as "a novel segmentation architecture" violates the
+experimental design.
+
+## Key References
+
+- Henry et al. *Query-Key Normalization for Transformers*. EMNLP 2020. arXiv:2010.04245.
+- López-Rubio et al. *Enhanced QKNorm with the Lp Norm*. 2026. arXiv:2602.05006.
+- Liu et al. *Swin Transformer*. ICCV 2021. arXiv:2103.14030.
+- Hatamizadeh et al. *Swin UNETR*. BrainLes 2021. arXiv:2201.01266.
+- Cao et al. *Swin-Unet*. ECCVW 2022. arXiv:2105.05537.
+- Liew et al. *ATLAS v2.0*. Scientific Data 2022. doi:10.1038/s41597-022-01401-7.
+
+## Environment
+
+- **Conda env:** `lpqknorm` (`~/.conda/envs/lpqknorm`)
+- **Python:** 3.11
+- **Project root:** `/home/mpascual/research/code/lp-qknorm-mri`
+- **Results directory:** `/media/mpascual/Sandisk2TB/research/lpqknorm_mri/results/`
+- **HPC:** Picasso (SLURM + Singularity, no Docker)
+- **Local GPU:** RTX 4060
+
+### Running commands
+
+Always prefix commands with the conda environment python:
+
+```bash
+~/.conda/envs/lpqknorm/bin/python -m pytest tests/ -v --tb=short
+~/.conda/envs/lpqknorm/bin/python -m ruff check src/ tests/
+~/.conda/envs/lpqknorm/bin/python -m ruff format src/ tests/
+~/.conda/envs/lpqknorm/bin/python -m mypy src/lpqknorm/
+```
+
+## Repository Layout
+
+```
+src/lpqknorm/           # Main package (editable install)
+  data/                 # Phase 1: ATLAS v2.0 pipeline, splits, stratification
+  models/               # Phase 2: LpQKNorm, LpWindowAttention, patched SwinUNETR
+  training/             # Phase 3: LightningModule, losses, metrics, callbacks
+  probes/               # Phase 4: Five mechanistic probes + recorder
+  analysis/             # Phase 5: Bootstrap, effect sizes, figures
+  utils/                # Exceptions, seeding, I/O, git, logging
+  cli/                  # Hydra entry points (train, probe, analyze, preprocess)
+
+configs/                # Hydra configuration hierarchy
+scripts/                # SLURM submission, download, environment verification
+tests/unit/             # Isolated module tests
+tests/integration/      # End-to-end pipeline tests
+tests/fixtures/         # Synthetic ATLAS cohort (5 patients)
+docs/                   # Phase specifications (read-only reference)
+```
+
+## Development Phases (Sequential)
+
+Work through phases in order. **Do not start phase N+1 until phase N's
+acceptance tests pass.**
+
+1. **Phase 1 — Data Pipeline** (`docs/phase_01_data.md`)
+   Deliverables: `data/`, `cli/preprocess.py`, `utils/exceptions.py`, `utils/seeding.py`
+   Output: single `atlas_2d.h5` (all lesion-bearing slices, chunked + gzip)
+   + `manifest.parquet` + patient-level splits + strata.
+   **Lesion-only:** background slices are discarded (mechanistic focus).
+   Tests: `test_splits.py`, `test_stratification.py`
+
+2. **Phase 2 — Model** (`docs/phase_02_model.md`)
+   Deliverables: `models/lp_qknorm.py`, `models/attention.py`,
+   `models/swin_unetr_lp.py`, `models/hooks.py`
+   Tests: `test_lp_qknorm.py`, `test_attention_equivalence.py`, `test_forward_pass.py`
+   **Critical test:** `p = 2` must recover original QKNorm exactly.
+
+3. **Phase 3 — Training** (`docs/phase_03_training.md`)
+   Deliverables: `training/`, `cli/train.py`, `scripts/submit_sweep.sbatch`
+   Tests: `test_training_step.py`, `test_resume.py`
+
+4. **Phase 4 — Probes** (`docs/phase_04_probes.md`)
+   Deliverables: `probes/`, `cli/probe.py`
+   Tests: `test_probes_synthetic.py`, `test_probe_pipeline.py`
+
+5. **Phase 5 — Analysis** (`docs/phase_05_analysis.md`)
+   Deliverables: `analysis/`, `cli/analyze.py`
+   Tests: `test_bootstrap.py`
+
+## Mathematical Specifications (Quick Reference)
+
+### Lp-QKNorm normalization
+
+```
+q̂_i^(p) = q_i / (||q_i||_p + ε)
+k̂_j^(p) = k_j / (||k_j||_p + ε)
+s_ij^(p) = α · ⟨q̂_i^(p), k̂_j^(p)⟩
+A = softmax(S^(p) + B_rel)
+```
+
+- `α = softplus(α_raw)` (learnable positive scalar)
+- `ε = 1e-6`
+- Numerically stable form for `p ≥ 2`: `||v||_p = (Σ_h |v_h|^p + ε)^(1/p)`
+- Numerically stable form for `p < 2`: `||v||_p = (Σ_h (|v_h| + ε)^p)^(1/p)`
+- `p` is a buffer (not a learnable parameter)
+
+### Five mechanistic probes (on stage-1 attention)
+
+| # | Probe | Formula | Range | Predicted p-trend |
+|---|-------|---------|-------|-------------------|
+| 1 | Peakiness | `ρ = \|\|v\|\|_∞ / \|\|v\|\|_2` | `[1/√d_k, 1]` | ↑ for lesion tokens |
+| 2 | Entropy | `H = -Σ A_ij log A_ij` | `[0, log W²]` | ↓ on lesion queries |
+| 3 | Lesion mass | `M = Σ_{j∈L} A_ij` | `[0, 1]` | ↑ on small stratum |
+| 4 | Logit gap | `Δ = max_L s_ij - med_B s_ij` | `ℝ` | interior max at p* |
+| 5 | Attn-mask IoU | top-k binarized attn vs mask | `[0, 1]` | ↑ with p |
+
+### Experimental design
+
+- **Sweep:** `p ∈ {vanilla, 2.0, 2.5, 3.0, 3.5, 4.0}` × `fold ∈ {0, 1, 2}` = 18 runs
+- **Vanilla baseline:** stock MONAI `WindowAttention` (no QKNorm) — lower-bound control
+- **Primary baseline:** `p = 2.0` (original QKNorm of Henry et al.)
+- **Headline metric:** lesion-wise recall on the small-lesion stratum (volume < 33rd percentile)
+- **Statistical test:** paired patient-level bootstrap (B = 10000), Cohen's d, Holm-Bonferroni (5 comparisons vs p=2)
+- **Probes:** stage-1 windowed attention only, on a fixed 32-slice validation batch
+- **Figure 1 (theory):** toy-model `Δ(p)` curves — can be generated before any experiments
+
+## Invariants (Never Violate)
+
+1. **Patient-level splits.** No patient ID may appear in more than one partition
+   (train/val/test) within a fold. Enforce with assertions and a dedicated test.
+2. **p=2 equivalence.** `LpQKNorm(p=2)` must be numerically identical to
+   Henry et al.'s original QKNorm. This is the single most important test.
+3. **Architecture preservation.** Only `WindowAttention.forward` is modified.
+   All other SwinUNETR components are stock MONAI.
+4. **Deterministic probes.** Probe batch is fixed across epochs and runs. No
+   augmentation during probing. Two identical calls produce identical results.
+5. **Log everything.** If it is computed during training/validation, it is
+   logged. Re-training to collect a missing metric is unacceptable.
+6. **Relative position bias preserved.** The bias is added after the QK dot
+   product, not absorbed into Q/K. Removing it conflates two effects.
+7. **Lesion-only dataset.** Every slice in `atlas_2d.h5` contains at least
+   `min_lesion_voxels_per_slice` lesion voxels. No background-only slices.
+   This is a deliberate design choice for mechanistic focus.
+8. **Single H5 file.** All preprocessed slices live in one `atlas_2d.h5`.
+   No per-patient files. Manifest row order matches H5 row order.
+
+## Code Conventions
+
+- **Python 3.11+** syntax: `X | None`, `list[int]`, `tuple[str, ...]`.
+- **Type hints** on every function signature and return type.
+- **Docstrings:** NumPy-style with `Parameters`, `Returns`, `Raises`.
+- **Config objects:** `@dataclass(frozen=True)` or Pydantic `BaseModel`.
+- **Exceptions:** Custom hierarchy per module under `utils/exceptions.py`.
+  At minimum: `LpQKNormError` (base), `DataIntegrityError`, `SplitLeakageError`,
+  `StratificationError`.
+- **Logging:** `logging` module with structured output. Never bare `print()` in
+  library code (`print` is acceptable only in scripts and notebooks).
+- **GPU memory:** Explicit `.detach()`, `torch.no_grad()`, `torch.cuda.empty_cache()`.
+  Use context managers for autocast control.
+- **Testing:** `pytest`, fixtures in `conftest.py`, parametrize edge cases.
+  Scientific assertions: `np.testing.assert_allclose(rtol=...)` or
+  `torch.testing.assert_close`. Separate unit/integration via
+  `@pytest.mark.integration`.
+- **Test file naming:** `test_<module>.py`, co-located in `tests/` mirroring `src/`.
+- **No bare dicts** for configuration that crosses function boundaries.
+
+## Verification Commands
+
+After any code change, run the full pipeline:
+
+```bash
+# 1. Unit tests
+~/.conda/envs/lpqknorm/bin/python -m pytest tests/unit/ -v --tb=short
+
+# 2. Integration tests (optional, slower)
+~/.conda/envs/lpqknorm/bin/python -m pytest tests/integration/ -v --tb=short
+
+# 3. Linter (auto-fix)
+~/.conda/envs/lpqknorm/bin/python -m ruff check --fix src/ tests/
+~/.conda/envs/lpqknorm/bin/python -m ruff format src/ tests/
+
+# 4. Type checker
+~/.conda/envs/lpqknorm/bin/python -m mypy src/lpqknorm/
+```
+
+## Git Conventions
+
+- Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
+- Branch naming: `feature/<short-description>`, `fix/<issue-ref>`.
+- Never commit large binary files (models, datasets, HDF5 caches).
+- Imperative subject line, max 72 chars.
+
+## Open Questions (Resolve Before Coding Each Phase)
+
+Each phase doc lists open questions the agent must resolve by inspecting the
+actual environment (MONAI source, ATLAS v2.0 directory structure, etc.) before
+writing code. Do not assume — verify, and record resolved values as module-level
+constants with citations. See `docs/phase_01_data.md` through
+`docs/phase_05_analysis.md` for the full list.
+
+## What Success Looks Like
+
+> Small-stratum lesion-wise recall at `p = p*` exceeds that at `p = 2` with a
+> 95% bootstrap CI excluding zero, a paired Cohen's d >= 0.3, and per-patient
+> correlation with at least two of the five probes in the theoretically
+> predicted direction (positive for peakiness/lesion mass/attention IoU,
+> negative for entropy) at |r| >= 0.2.
+
+If both the headline and probe chain hold, we have a mechanistically
+interpretable result. If only one holds, the paper is weaker but still
+publishable. Either outcome is informative.

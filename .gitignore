@@ -205,3 +205,32 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================================
+# Project-specific: Lp-QKNorm MRI
+# ============================================================
+
+# Data and results (large, not tracked in git)
+data/
+results/
+paper_outputs/
+*.h5
+*.hdf5
+*.nii
+*.nii.gz
+*.ckpt
+*.pt
+*.pth
+
+# Preprocessed slice cache
+slices/
+
+# Hydra run directories
+outputs/
+multirun/
+
+# W&B
+wandb/
+
+# QC artefacts
+qc/
