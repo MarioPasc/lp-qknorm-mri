@@ -211,7 +211,6 @@ __marimo__/
 # ============================================================
 
 # Data and results (large, not tracked in git)
-data/
 results/
 paper_outputs/
 *.h5
