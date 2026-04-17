@@ -5,3 +5,14 @@ feature_size: 24
 # p: null means vanilla baseline (stock MONAI WindowAttention, no QKNorm).
 # Sweep overrides: model.p=2.0, model.p=2.5, model.p=3.0, model.p=3.5, model.p=4.0
 p: null
+
+# --- Phase 2 weight initialization (from-scratch regime) ---
+# init_scheme: "scratch_trunc_normal" is the primary sweep; "pretrained_ssl"
+#   is a single ablation row loading Tang et al. (2022) SSL weights.
+# linear_init_std: truncated-normal std for Linear/Conv/relative-position-bias.
+# alpha_init_scheme: "log_dk" recovers the Henry et al. (2020) scale at p=2.
+# alpha_init_fixed: required iff alpha_init_scheme == "fixed".
+init_scheme: scratch_trunc_normal
+linear_init_std: 0.02
+alpha_init_scheme: log_dk
+alpha_init_fixed: null

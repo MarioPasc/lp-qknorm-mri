@@ -115,10 +115,18 @@ acceptance tests pass.**
 
 2. **Phase 2 — Model** (`docs/phase_02_model.md`)
    Deliverables: `models/lp_qknorm.py`, `models/attention.py`,
-   `models/swin_unetr_lp.py`, `models/hooks.py`
+   `models/swin_unetr_lp.py`, `models/hooks.py`, `models/init.py`
    Supports `spatial_dims=2` and `spatial_dims=3`; reads `in_channels` and
    `out_channels` from the HDF5 header for dataset-agnostic configuration.
-   Tests: `test_lp_qknorm.py`, `test_attention_equivalence.py`, `test_forward_pass.py`
+   **From-scratch weight init** (`init_scheme="scratch_trunc_normal"`,
+   default) applies `trunc_normal_(std=0.02)` to every `nn.Linear`,
+   `nn.Conv{2,3}d`, and `relative_position_bias_table`, sets `nn.LayerNorm`
+   to `(ones, zeros)`, and seeds `LpQKNorm.alpha_raw = softplus_inverse(log d_k)`
+   per stage (Henry et al., 2020).  Pretrained Swin-UNETR weights are
+   deferred to a single ablation row (`init_scheme="pretrained_ssl"`) to
+   avoid biasing Q/K geometry toward the `p=2` (ℓ₂) regime.
+   Tests: `test_lp_qknorm.py`, `test_attention_equivalence.py`,
+   `test_forward_pass.py`, `test_init.py`.
    **Critical test:** `p = 2` must recover original QKNorm exactly.
 
 3. **Phase 3 — Training** (`docs/phase_03_training.md`)
@@ -126,9 +134,18 @@ acceptance tests pass.**
    Dataset-agnostic: reads HDF5 header to configure model and loss.
    Tests: `test_training_step.py`, `test_resume.py`
 
-4. **Phase 4 — Probes** (`docs/phase_04_probes.md`)
-   Deliverables: `probes/`, `cli/probe.py`
-   Tests: `test_probes_synthetic.py`, `test_probe_pipeline.py`
+4. **Phase 4 — Probes** (`docs/phase_04_probes.md`)  ✅ **complete**
+   Deliverables: `probes/` (Probes 1–8 + `attention_maps.py` + `patching.py` +
+   `tokenization.py` with `window_boundary_distance`), `cli/probe.py`,
+   `cli/patching.py`, `training/callbacks.py::AlphaLogger`,
+   `training/callbacks.py::PatchingCallback`.
+   Output schema: one `probes/epoch_{N}.h5` with `/metadata`, `/inputs`,
+   `/block_0_wmsa`, `/block_1_swmsa` per checkpoint, plus
+   `probes/patching_best_dice.h5` (five variants × two blocks, denoising +
+   noising) and `probes/alpha_trajectory.jsonl` (per-step α).
+   Tests (all green): `test_probes_synthetic.py`, `test_tokenization.py`,
+   `test_attention_maps.py`, `test_patching.py`, `test_probe_pipeline.py`
+   (AT1–AT11).
 
 5. **Phase 5 — Analysis** (`docs/phase_05_analysis.md`)
    Deliverables: `analysis/`, `cli/analyze.py`
@@ -198,6 +215,19 @@ A = softmax(S^(p) + B_rel)
    HDF5 header (`DatasetHeader.from_h5()`) to discover `n_modalities`,
    `n_label_classes`, `dataset_name`, etc. Only converter code is
    dataset-specific.
+10. **Init spec identity across the sweep.** `init_scheme`, `linear_init_std`,
+    `alpha_init_scheme`, and `alpha_init_fixed` must be identical across all
+    `p` values and all folds of a primary sweep. Drift in any of these
+    confounds the `p` effect. The training CLI hashes these fields into
+    `manifest.json::init_spec_hash`; the sweep aggregator must assert
+    equality across runs grouped by `experiment`.
+11. **Controlled init RNG consumption.** `build_swin_unetr_lp` calls
+    `initialize_model` after patching, which re-initializes every `nn.Linear`,
+    `nn.Conv{2,3}d`, `nn.LayerNorm`, and `relative_position_bias_table` via a
+    single `model.apply`.  At a fixed seed, all non-`alpha_raw` tensors must
+    be byte-identical across `p` values; `alpha_raw` may differ only if the
+    scheme makes it depend on `d_k` (it does not under `log_dk` with
+    `feature_size=24`, since `d_k=8` at every stage).
 
 ## Code Conventions
 

@@ -47,6 +47,7 @@ from monai.networks.nets import SwinUNETR  # type: ignore[attr-defined]
 from monai.networks.nets.swin_unetr import WindowAttention
 
 from lpqknorm.models.attention import LpWindowAttention
+from lpqknorm.models.init import AlphaInitScheme, InitScheme, initialize_model
 from lpqknorm.utils.exceptions import PatchingError, WeightTransferError
 
 
@@ -71,6 +72,11 @@ def build_swin_unetr_lp(
     feature_size: int = 24,
     lp_cfg: LpQKNormConfig | None = None,
     patch_base: Literal["monai"] = "monai",
+    *,
+    init_scheme: InitScheme = "scratch_trunc_normal",
+    linear_init_std: float = 0.02,
+    alpha_init_scheme: AlphaInitScheme = "log_dk",
+    alpha_init_fixed: float | None = None,
 ) -> nn.Module:
     """Build a 2D SwinUNETR, optionally patched with Lp-QKNorm attention.
 
@@ -95,6 +101,22 @@ def build_swin_unetr_lp(
         unmodified (vanilla softmax baseline).
     patch_base : ``"monai"``
         Base model source.  Currently only ``"monai"`` is supported.
+    init_scheme : {"scratch_trunc_normal", "pretrained_ssl"}
+        Weight-initialization regime.  ``"scratch_trunc_normal"`` is the
+        primary from-scratch run and is applied via ``model.apply`` after
+        patching.  ``"pretrained_ssl"`` leaves non-``alpha_raw`` tensors
+        untouched (the caller is expected to ``load_state_dict`` a Tang
+        et al. (2022) SSL checkpoint prior to calling this function with
+        the SSL scheme; ``alpha_raw`` is still seeded here).
+    linear_init_std : float
+        Std for ``trunc_normal_`` on ``nn.Linear`` / ``nn.Conv{2,3}d`` /
+        ``relative_position_bias_table`` weights.  Default ``0.02`` per
+        Swin (Liu et al., 2021) and ViT (Dosovitskiy et al., 2021).
+    alpha_init_scheme : {"log_dk", "sqrt_dk", "fixed"}
+        Scheme for ``LpQKNorm.alpha_raw``.  Default ``"log_dk"`` (Henry
+        et al., 2020).
+    alpha_init_fixed : float or None
+        Required iff ``alpha_init_scheme == "fixed"``.
 
     Returns
     -------
@@ -106,6 +128,9 @@ def build_swin_unetr_lp(
     PatchingError
         If no ``WindowAttention`` modules are found in the constructed model
         (unexpected MONAI internal change) when ``lp_cfg`` is not ``None``.
+    LpInitError
+        If the initialization spec is invalid (see
+        :func:`lpqknorm.models.init.initialize_model`).
     """
     # -- Step 1: construct stock MONAI SwinUNETR --------------------------
     model = SwinUNETR(
@@ -120,6 +145,18 @@ def build_swin_unetr_lp(
             "build_swin_unetr_lp: lp_cfg=None — returning stock MONAI SwinUNETR "
             "(vanilla baseline)."
         )
+        # Vanilla baseline: no LpQKNorm to seed, but still re-init the shared
+        # trunk (trunc_normal_ linear / conv / layernorm) for determinism when
+        # the caller opts into scratch initialization.  Skipping silently when
+        # the caller chose the SSL scheme.
+        if init_scheme == "scratch_trunc_normal":
+            initialize_model(
+                model,
+                init_scheme=init_scheme,
+                linear_init_std=linear_init_std,
+                alpha_init_scheme=alpha_init_scheme,
+                alpha_init_fixed=alpha_init_fixed,
+            )
         return model
 
     # -- Step 2: find and replace all WindowAttention modules -------------
@@ -163,6 +200,18 @@ def build_swin_unetr_lp(
             f"Only {n_replaced} were found and patched.",
             details={"remaining": remaining, "replaced": n_replaced},
         )
+
+    # -- Step 3: apply weight-initialization spec --------------------------
+    # Must run AFTER patching so that LpWindowAttention parameters (qkv, proj,
+    # rel-pos-bias table) and LpQKNorm.alpha_raw are present on the module
+    # tree that ``initialize_model`` walks.
+    initialize_model(
+        model,
+        init_scheme=init_scheme,
+        linear_init_std=linear_init_std,
+        alpha_init_scheme=alpha_init_scheme,
+        alpha_init_fixed=alpha_init_fixed,
+    )
 
     return model
 

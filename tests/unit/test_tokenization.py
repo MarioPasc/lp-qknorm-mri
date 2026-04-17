@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import torch
 
-from lpqknorm.probes.tokenization import mask_to_token_flags, window_partition_flags
+from lpqknorm.probes.tokenization import (
+    mask_to_token_flags,
+    window_boundary_distance,
+    window_partition_flags,
+)
 
 
 class TestMaskToTokenFlags:
@@ -97,3 +101,31 @@ class TestWindowPartitionFlags:
         flags = torch.zeros(2, 112 * 112, dtype=torch.bool)
         wp = window_partition_flags(flags, (112, 112), window_size=7)
         assert wp.shape == (512, 49)
+
+
+class TestWindowBoundaryDistance:
+    """Window-boundary distance per lesion query."""
+
+    def test_corner_distance_is_zero(self) -> None:
+        """A token at the (0, 0) corner has distance 0."""
+        flags = torch.zeros(1, 49, dtype=torch.bool)
+        flags[0, 0] = True
+        d = window_boundary_distance(flags, window_size=7)
+        assert d.dtype == torch.int8
+        assert d.tolist() == [0]
+
+    def test_centre_distance_equals_half_window(self) -> None:
+        """A token at the (3, 3) centre of a 7x7 window has distance 3."""
+        flags = torch.zeros(1, 49, dtype=torch.bool)
+        flags[0, 3 * 7 + 3] = True
+        d = window_boundary_distance(flags, window_size=7)
+        assert d.tolist() == [3]
+
+    def test_output_length_matches_n_lesion(self) -> None:
+        """Number of returned distances equals number of lesion tokens."""
+        torch.manual_seed(0)
+        flags = torch.rand(5, 49) > 0.5
+        d = window_boundary_distance(flags, window_size=7)
+        assert d.numel() == int(flags.sum().item())
+        assert (d >= 0).all()
+        assert (d <= 3).all()  # max distance = (7 - 1) // 2 = 3

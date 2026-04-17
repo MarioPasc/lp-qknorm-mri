@@ -560,3 +560,157 @@ class ProbeCallback(pl.Callback):
             epoch_tag=epoch_tag,
             device=pl_module.device,
         )
+
+
+# ---------------------------------------------------------------------------
+# AlphaLogger
+# ---------------------------------------------------------------------------
+
+
+class AlphaLogger(pl.Callback):
+    """Append ``softplus(alpha_raw)`` to ``alpha_trajectory.jsonl`` per step.
+
+    One line per (step, block) is written so the Phase-5 control analysis
+    can correlate the learnable scale ``alpha`` with the empirical logit
+    gap ``Delta(p)``.  Covers stage-0 blocks 0 and 1 by default.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Per-run artefact directory.  Output lives under
+        ``run_dir / "probes" / "alpha_trajectory.jsonl"``.
+    stage : int
+        Swin stage whose alpha values are logged.  Default ``0``.
+    blocks : tuple[int, ...]
+        Block indices within the stage.  Default ``(0, 1)``.
+    p_value : float
+        The Lp norm exponent for the current run (for provenance).
+    fold : int
+        Cross-validation fold index for the current run.
+
+    Notes
+    -----
+    Writing is append-only and unbuffered (``flush=True``) so mid-run
+    crashes do not lose the trajectory.  The file is deleted on
+    ``on_fit_start`` so re-running a fold clears the old log.
+    """
+
+    def __init__(
+        self,
+        run_dir: Path,
+        stage: int = 0,
+        blocks: tuple[int, ...] = (0, 1),
+        p_value: float = 2.0,
+        fold: int = 0,
+    ) -> None:
+        self._run_dir = run_dir
+        self._stage = stage
+        self._blocks = blocks
+        self._p = p_value
+        self._fold = fold
+        self._path = run_dir / "probes" / "alpha_trajectory.jsonl"
+
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Create the output file (truncating any previous content)."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text("")
+        logger.info("AlphaLogger: initialised trajectory at %s", self._path)
+
+    def on_train_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Append one JSONL record per block after each optimizer step."""
+        model: torch.nn.Module = pl_module.model  # type: ignore[assignment]
+        step = trainer.global_step
+        epoch = trainer.current_epoch
+        try:
+            layer = getattr(model.swinViT, f"layers{self._stage + 1}")[0]
+        except AttributeError:
+            return
+        with self._path.open("a") as fh:
+            for b in self._blocks:
+                try:
+                    attn = layer.blocks[b].attn
+                    alpha_raw = attn.lp_qknorm.alpha_raw
+                except AttributeError:
+                    continue
+                alpha = float(torch.nn.functional.softplus(alpha_raw).item())
+                rec = {
+                    "step": int(step),
+                    "epoch": int(epoch),
+                    "block": int(b),
+                    "alpha": alpha,
+                    "p": float(self._p),
+                    "fold": int(self._fold),
+                }
+                fh.write(json.dumps(rec) + "\n")
+            fh.flush()
+
+
+# ---------------------------------------------------------------------------
+# PatchingCallback
+# ---------------------------------------------------------------------------
+
+
+class PatchingCallback(pl.Callback):
+    """Run :class:`~lpqknorm.probes.patching.ActivationPatcher` on fit end.
+
+    Parameters
+    ----------
+    config : PatchingConfig
+        Already-populated patching config (source/target checkpoints etc).
+    probe_loader : Any
+        Fixed probe DataLoader to reuse.
+    output_dir : Path
+        Directory for the ``patching_best_dice.h5`` file.  Created on
+        ``on_fit_end``.
+    model_loader : Callable[[Path], nn.Module] or None
+        Optional factory for loading source/target models.  Passed through
+        to :class:`ActivationPatcher`.
+
+    Notes
+    -----
+    If the config references checkpoints that do not yet exist on disk the
+    callback silently skips the patching run and emits a warning; this
+    keeps the train loop resilient when the best-small-recall model has
+    not been selected yet.
+    """
+
+    def __init__(
+        self,
+        config: Any,
+        probe_loader: Any,
+        output_dir: Path,
+        model_loader: Any = None,
+    ) -> None:
+        self._config = config
+        self._probe_loader = probe_loader
+        self._output_dir = output_dir
+        self._model_loader = model_loader
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Trigger the patching sweep at end-of-fit."""
+        del trainer, pl_module  # unused
+        from pathlib import Path as _Path
+
+        from lpqknorm.probes.patching import ActivationPatcher
+
+        src = _Path(self._config.source_checkpoint)
+        tgt = _Path(self._config.target_checkpoint)
+        if not src.exists() or not tgt.exists():
+            logger.warning(
+                "PatchingCallback: checkpoints missing (src=%s, tgt=%s); "
+                "skipping patching.",
+                src,
+                tgt,
+            )
+            return
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        patcher = ActivationPatcher(self._config, model_loader=self._model_loader)
+        out = patcher.run(self._probe_loader, self._output_dir)
+        logger.info("PatchingCallback: wrote %s", out)

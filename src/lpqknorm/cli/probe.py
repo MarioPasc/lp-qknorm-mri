@@ -23,7 +23,10 @@ from lpqknorm.probes import (
     FeaturePeakiness,
     LesionAttentionMass,
     LesionBackgroundLogitGap,
+    LinearProbe,
     ProbeRecorder,
+    SpatialLocalizationError,
+    SpectralProbe,
 )
 from lpqknorm.training.module import LpSegmentationModule
 
@@ -76,6 +79,9 @@ def main() -> None:
             LesionAttentionMass(),
             LesionBackgroundLogitGap(),
             AttentionMaskIoU(),
+            SpatialLocalizationError(),
+            LinearProbe(),
+            SpectralProbe(),
         ],
         output_dir=Path(args.output_dir),
         n_probe_samples=args.n_probe_samples,

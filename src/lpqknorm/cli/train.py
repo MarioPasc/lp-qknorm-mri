@@ -124,6 +124,14 @@ def main(cfg: DictConfig) -> None:
         in_channels=cfg.model.in_channels,
         out_channels=cfg.model.out_channels,
         feature_size=cfg.model.feature_size,
+        init_scheme=cfg.model.get("init_scheme", "scratch_trunc_normal"),
+        linear_init_std=float(cfg.model.get("linear_init_std", 0.02)),
+        alpha_init_scheme=cfg.model.get("alpha_init_scheme", "log_dk"),
+        alpha_init_fixed=(
+            float(cfg.model.alpha_init_fixed)
+            if cfg.model.get("alpha_init_fixed", None) is not None
+            else None
+        ),
     )
     lp_cfg: LpQKNormConfig | None = (
         LpQKNormConfig(p=float(cfg.model.p)) if cfg.model.p is not None else None
@@ -152,6 +160,21 @@ def main(cfg: DictConfig) -> None:
         gpu_model = torch.cuda.get_device_name(0)
         cuda_version = torch.version.cuda or "N/A"
 
+    # Init-spec hash: isolates the weight-initialization fields so the
+    # Manifest can assert byte-equality across runs grouped by experiment.
+    # The primary-sweep controlled experiment requires every p / fold run
+    # to share identical init_scheme / linear_init_std / alpha_init_scheme /
+    # alpha_init_fixed; drift in any of these would confound the p effect.
+    init_spec = {
+        "init_scheme": model_cfg.init_scheme,
+        "linear_init_std": model_cfg.linear_init_std,
+        "alpha_init_scheme": model_cfg.alpha_init_scheme,
+        "alpha_init_fixed": model_cfg.alpha_init_fixed,
+    }
+    init_spec_hash = hashlib.sha256(
+        json.dumps(init_spec, sort_keys=True).encode()
+    ).hexdigest()
+
     manifest_init: dict[str, object] = {
         "run_id": str(uuid.uuid4()),
         "experiment": cfg.get("experiment", "p_sweep_v1"),
@@ -172,6 +195,11 @@ def main(cfg: DictConfig) -> None:
         "n_train": getattr(dm, "n_train", 0),
         "n_val": getattr(dm, "n_val", 0),
         "n_test": getattr(dm, "n_test", 0),
+        "init_scheme": model_cfg.init_scheme,
+        "linear_init_std": model_cfg.linear_init_std,
+        "alpha_init_scheme": model_cfg.alpha_init_scheme,
+        "alpha_init_fixed": model_cfg.alpha_init_fixed,
+        "init_spec_hash": init_spec_hash,
     }
 
     # --- LightningModule ---

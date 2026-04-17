@@ -337,3 +337,166 @@ to the theoretical prediction and catches sign errors early.
 - Liu et al. *Swin Transformer*. ICCV 2021. arXiv:2103.14030.
 - Hatamizadeh et al. *Swin UNETR*. BrainLes 2021. arXiv:2201.01266.
 - MONAI documentation, `monai.networks.nets.SwinUNETR`.
+
+======
+
+# Phase 2 — Weight Initialization Spec (From-Scratch Regime)
+
+## Context
+
+All experiments in the primary run are trained **from scratch** (no
+pretrained backbone). The rationale is methodological: this is a
+mechanistic study of the $\ell_p$ parameter inside `LpWindowAttention`,
+and pretrained weights — which were shaped under vanilla scaled-dot-product
+attention, i.e., implicitly the $p = 2$ regime — would bias the learned
+Q/K geometry toward $\ell_2$-amenable configurations and confound the
+$p$ effect.
+
+Dataset budget for the primary sweep: **BraTS-MEN, ~1000 subjects**
+(meningioma). This is sufficient for a 2D slice-level Swin-UNETR with
+`feature_size=24` when combined with aggressive augmentation and
+early stopping. Pretrained-backbone runs are deferred to an ablation row
+(see [§ Ablation](#ablation)).
+
+## Required additions to `ModelConfig`
+
+Add three fields to `lpqknorm.training.module.ModelConfig`:
+
+```python
+@dataclass(frozen=True)
+class ModelConfig:
+    img_size: tuple[int, int] = (224, 224)
+    in_channels: int = 1
+    out_channels: int = 1
+    feature_size: int = 24
+
+    # --- New: initialization spec ---
+    init_scheme: Literal["scratch_trunc_normal", "pretrained_ssl"] = "scratch_trunc_normal"
+    linear_init_std: float = 0.02
+    alpha_init_scheme: Literal["log_dk", "sqrt_dk", "fixed"] = "log_dk"
+    alpha_init_fixed: float | None = None  # used only if alpha_init_scheme == "fixed"
+```
+
+Mirror the same fields in `configs/model/default.yaml`:
+
+```yaml
+img_size: [224, 224]
+in_channels: 1
+out_channels: 1
+feature_size: 24
+p: null
+
+init_scheme: scratch_trunc_normal
+linear_init_std: 0.02
+alpha_init_scheme: log_dk
+alpha_init_fixed: null
+```
+
+## Initialization rules (scheme = `scratch_trunc_normal`)
+
+Applied inside `build_swin_unetr_lp` **after** MONAI `SwinUNETR`
+construction and the `LpWindowAttention` patch, via a single
+`model.apply(_init_weights)` pass. The function must be implemented in
+`lpqknorm/models/init.py` and unit-tested in isolation.
+
+| Module type | Weight | Bias | Notes |
+|---|---|---|---|
+| `nn.Linear` (incl. `qkv`, `proj`, MLP) | `trunc_normal_(std=linear_init_std)` | `zeros_` | `std = 0.02` per Swin (Liu et al., 2021) and ViT (Dosovitskiy et al., 2021). |
+| `nn.Conv{2,3}d` (incl. patch embed) | `trunc_normal_(std=linear_init_std)` | `zeros_` | Keep patch-embed consistent with Swin original. |
+| `nn.LayerNorm` | `ones_` ($\gamma$) | `zeros_` ($\beta$) | Standard pre-norm Transformer init. |
+| `relative_position_bias_table` | `trunc_normal_(std=linear_init_std)` | — | Already handled by MONAI; re-apply for determinism. |
+| `LpQKNorm.alpha_raw` | per `alpha_init_scheme` (below) | — | Must be identical across all $p$ values in the sweep. |
+
+### $\alpha$ initialization
+
+Let $d_k = \texttt{feature\_size} / \texttt{num\_heads\_per\_stage}$
+(computed **per stage**, since Swin-UNETR heads grow with depth).
+
+Let $\alpha^\star$ denote the target effective scale. Set
+`alpha_raw = softplus_inverse(alpha_star)` so that
+`softplus(alpha_raw) = alpha_star` exactly.
+
+| `alpha_init_scheme` | $\alpha^\star$ | Reference |
+|---|---|---|
+| `log_dk` (**default**) | $\log d_k$ | Henry et al., 2020, §3.2. |
+| `sqrt_dk` | $\sqrt{d_k}$ | Alternative matching scaled-dot-product magnitude. |
+| `fixed` | `alpha_init_fixed` | Ablation only. Raise `LpInitError` if `None`. |
+
+At $p = 2$ with `alpha_init_scheme = log_dk`, the functional scale of the
+logits $\alpha \langle \hat{q}, \hat{k} \rangle \in [-\log d_k, \log d_k]$
+matches Henry et al. (2020). This is the clean baseline against which the
+$p$ sweep is compared.
+
+**Hard constraint (controlled experiment):** `alpha_init_scheme`,
+`alpha_init_fixed`, and `linear_init_std` must be **identical across
+all $p$ values and all folds** in a sweep. The `Manifest` writer should
+hash these fields and assert equality across runs grouped by experiment.
+
+## Numerical stability
+
+`softplus_inverse(x)` for $x > 0$:
+
+$$
+\text{softplus}^{-1}(x) = \log(e^{x} - 1).
+$$
+
+For $x > 20$ use the stable branch
+`softplus_inverse(x) = x + log(1 - exp(-x))` to avoid `inf`. Implement as:
+
+```python
+def softplus_inverse(x: float) -> float:
+    """Numerically stable inverse of softplus for x > 0."""
+    if x <= 0.0:
+        raise LpInitError(f"alpha target must be > 0, got {x}")
+    if x > 20.0:
+        return x + math.log1p(-math.exp(-x))
+    return math.log(math.expm1(x))
+```
+
+## Ablation
+
+A single ablation row uses pretrained self-supervised Swin-UNETR weights
+(Tang et al., 2022; arXiv:2111.14791), selected via
+`init_scheme = pretrained_ssl`. When loading, `LpQKNorm` state
+(`alpha_raw`) is **not** in the checkpoint and falls back to the scheme
+above; all other weights are loaded strict=False with an assertion that
+the set of missing keys equals exactly
+`{"*.attn.lp_qknorm.alpha_raw"}`. Any other missing key aborts with
+`LpInitError`.
+
+## Acceptance tests
+
+Add to `tests/unit/test_init.py`:
+
+1. **Default init runs end-to-end.** Build a tiny model
+   (`feature_size=12`) with `init_scheme="scratch_trunc_normal"`;
+   assert no `NaN`/`Inf` in any parameter.
+2. **Linear-weight empirical std.** For each `nn.Linear` with
+   $\geq 1024$ elements, assert
+   `abs(weight.std() - 0.02) < 0.004` (sample tolerance).
+3. **LayerNorm defaults.** Every `nn.LayerNorm`: `weight == 1`,
+   `bias == 0`.
+4. **$\alpha$ target scale.** Per stage $s$,
+   `softplus(alpha_raw) ≈ log(d_k_s)` within `1e-6`.
+5. **Determinism across $p$.** Initialize models at
+   $p \in \{2, 2.5, 3, 3.5, 4\}$ with the same seed; assert all
+   `qkv`, `proj`, MLP, LN, and `relative_position_bias_table` tensors
+   are **byte-identical**. Only `alpha_raw` may differ — and only if it
+   was configured to differ (by default it must not).
+6. **Forward pass smoke.** $16 \times 1 \times 224 \times 224$ input,
+   assert output shape and finite activations.
+
+## References
+
+- Liu, Z. et al. *Swin Transformer*. ICCV 2021. arXiv:2103.14030.
+- Hatamizadeh, A. et al. *Swin UNETR*. BrainLes 2021. arXiv:2201.01266.
+- Henry, A. et al. *Query-Key Normalization for Transformers*.
+  Findings of EMNLP 2020. arXiv:2010.04245.
+- López-Rubio, E. et al. *Enhanced QKNorm with the Lp Norm*. 2026.
+  arXiv:2602.05006.
+- Dosovitskiy, A. et al. *An Image is Worth 16×16 Words*. ICLR 2021.
+  arXiv:2010.11929.
+- Tang, Y. et al. *Self-Supervised Pre-Training of Swin Transformers for
+  3D Medical Image Analysis*. CVPR 2022. arXiv:2111.14791.
+- He, K. et al. *Delving Deep into Rectifiers*. ICCV 2015.
+  arXiv:1502.01852.

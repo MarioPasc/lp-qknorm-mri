@@ -130,6 +130,8 @@ ignore = [
     "B008",    # do not perform function calls in argument defaults (Hydra uses this)
     "SIM108",  # ternary operator (readability preference)
     "UP007",   # X | Y union syntax in annotations (keep for clarity in complex types)
+    "RUF002",  # en-dash in docstrings is a deliberate project convention
+    "RUF003",  # en-dash in comments is a deliberate project convention
 ]
 
 [tool.ruff.lint.per-file-ignores]

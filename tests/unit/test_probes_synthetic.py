@@ -16,8 +16,11 @@ from lpqknorm.models.lp_qknorm import LpQKNorm, LpQKNormConfig
 from lpqknorm.probes.attention_iou import AttentionMaskIoU
 from lpqknorm.probes.entropy import AttentionEntropy
 from lpqknorm.probes.lesion_mass import LesionAttentionMass
+from lpqknorm.probes.linear_probe import LinearProbe
 from lpqknorm.probes.logit_gap import LesionBackgroundLogitGap
 from lpqknorm.probes.peakiness import FeaturePeakiness
+from lpqknorm.probes.spatial_loc_error import SpatialLocalizationError
+from lpqknorm.probes.spectral import SpectralProbe
 
 
 class TestPeakinessAT1:
@@ -193,3 +196,85 @@ class TestLogitGapAT2:
         assert all(g > 0 for g in gaps), f"All gaps must be positive: {gaps}"
         # Not all identical (probe is sensitive to p)
         assert max(gaps) - min(gaps) > 1e-4, f"Gaps should vary: {gaps}"
+
+
+class TestSpatialLocErrorAT1:
+    """AT1: Spatial localisation error bounds and centre alignment."""
+
+    def test_peaked_on_centroid_gives_zero(self) -> None:
+        """Attention peaked on the lesion centroid → SLE = 0."""
+        w = 7
+        attn = torch.zeros(1, w * w)
+        attn[0, 24] = 1.0  # centre of a 7x7 window
+        lesion_mask = torch.zeros(w * w, dtype=torch.bool)
+        lesion_mask[24] = True
+        sle = SpatialLocalizationError.compute_per_query(attn, lesion_mask, w)
+        assert sle.item() == pytest.approx(0.0, abs=1e-5)
+
+    def test_non_negative(self) -> None:
+        """SLE is always non-negative."""
+        torch.manual_seed(0)
+        w = 7
+        attn = torch.softmax(torch.randn(4, w * w), dim=-1)
+        lesion_mask = torch.zeros(w * w, dtype=torch.bool)
+        lesion_mask[:5] = True
+        sle = SpatialLocalizationError.compute_per_query(attn, lesion_mask, w)
+        assert (sle >= 0.0).all()
+
+    def test_bounded_by_window_diagonal(self) -> None:
+        """SLE never exceeds W*sqrt(2)."""
+        w = 7
+        attn = torch.zeros(1, w * w)
+        attn[0, 0] = 1.0  # corner
+        lesion_mask = torch.zeros(w * w, dtype=torch.bool)
+        lesion_mask[w * w - 1] = True  # opposite corner
+        sle = SpatialLocalizationError.compute_per_query(attn, lesion_mask, w)
+        assert sle.item() <= w * math.sqrt(2)
+
+
+class TestSpectralAT1:
+    """AT1: Participation ratio sanity."""
+
+    def test_isotropic_pr_equals_dk(self) -> None:
+        """Isotropic Gaussian features have PR ≈ d_k."""
+        torch.manual_seed(0)
+        x = torch.randn(10_000, 16)
+        pr = SpectralProbe._participation_ratio(x)
+        assert pr == pytest.approx(16.0, rel=0.1)
+
+    def test_rank_one_pr_equals_one(self) -> None:
+        """Rank-1 features have PR ≈ 1."""
+        torch.manual_seed(0)
+        u = torch.randn(16)
+        x = torch.randn(10_000, 1) * u
+        pr = SpectralProbe._participation_ratio(x)
+        assert pr == pytest.approx(1.0, abs=0.1)
+
+    def test_eigenvalues_length_and_order(self) -> None:
+        """Eigenvalue output has length d_k and is sorted descending."""
+        torch.manual_seed(0)
+        x = torch.randn(200, 8)
+        ev = SpectralProbe._eigenvalues(x)
+        assert ev.shape == (8,)
+        diff = ev[:-1] - ev[1:]
+        assert (diff >= -1e-5).all()
+
+
+class TestLinearProbeAT1:
+    """AT1: Linear probe separability."""
+
+    def test_separable_features_give_high_ba(self) -> None:
+        """Clearly separable Gaussian clusters → BA ≥ 0.95."""
+        torch.manual_seed(0)
+        x_lesion = torch.randn(100, 16) + 3.0
+        x_bg = torch.randn(100, 16) - 3.0
+        metrics = LinearProbe(n_splits=5).compute_value(x_lesion, x_bg)
+        assert metrics.balanced_accuracy >= 0.95
+
+    def test_non_separable_features_give_chance(self) -> None:
+        """Identical clusters → BA near 0.5."""
+        torch.manual_seed(0)
+        x_lesion = torch.randn(100, 16)
+        x_bg = torch.randn(100, 16)
+        metrics = LinearProbe(n_splits=5).compute_value(x_lesion, x_bg)
+        assert metrics.balanced_accuracy <= 0.7

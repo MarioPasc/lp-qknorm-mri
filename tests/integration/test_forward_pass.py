@@ -67,70 +67,86 @@ class TestDropInShapeCompatibility:
 
 @pytest.mark.integration
 class TestWeightTransferIntegrity:
-    def test_weights_transferred(self) -> None:
-        """After patching, qkv, proj, and relative position bias in each
-        LpWindowAttention must match the weights from the stock
-        WindowAttention that build_swin_unetr_lp constructed internally.
+    def test_copy_weights_transfers_stock_tensors(self) -> None:
+        """The ``_copy_weights`` helper used during patching must transfer
+        qkv / proj / relative-position-bias tensors byte-identically.
 
-        Strategy: build one stock model, snapshot its attention weights,
-        then build a patched model from the same constructor and verify
-        the patched model's attention weights are internally consistent
-        (i.e., the patching copied weights from the stock model it created).
+        Historically this test verified that the built patched model had the
+        same weights as the stock model it was constructed from.  That
+        invariant no longer holds because ``build_swin_unetr_lp`` applies the
+        Phase-2 weight-initialization spec after patching, deliberately
+        overwriting the copied tensors.  The structural contract of the
+        copy step itself is still tested here.
         """
         from monai.networks.nets import SwinUNETR
         from monai.networks.nets.swin_unetr import (
             WindowAttention as MonaiWindowAttention,
         )
 
-        # Build a stock model and save its attention weights as reference.
+        from lpqknorm.models.swin_unetr_lp import _copy_weights
+
         torch.manual_seed(123)
         stock = SwinUNETR(
             in_channels=1, out_channels=2, feature_size=24, spatial_dims=2
         )
-        stock_weights: dict[str, dict[str, torch.Tensor]] = {}
-        for name, mod in stock.named_modules():
-            if isinstance(mod, MonaiWindowAttention):
-                stock_weights[name] = {
-                    "qkv.weight": mod.qkv.weight.clone(),
-                    "proj.weight": mod.proj.weight.clone(),
-                    "rpb": mod.relative_position_bias_table.data.clone(),
-                }
-                if mod.qkv.bias is not None:
-                    stock_weights[name]["qkv.bias"] = mod.qkv.bias.clone()
-
-        # Build patched model with the same seed so its internal stock
-        # construction produces identical weights.
-        torch.manual_seed(123)
-        patched = build_swin_unetr_lp(**_build_kwargs(), lp_cfg=LpQKNormConfig(p=2.0))
-
-        patched_attns = [
+        stock_attns = [
             (n, m)
-            for n, m in patched.named_modules()
-            if isinstance(m, LpWindowAttention)
+            for n, m in stock.named_modules()
+            if isinstance(m, MonaiWindowAttention)
         ]
-        assert len(patched_attns) == len(stock_weights), (
-            f"Module count mismatch: stock={len(stock_weights)}, patched={len(patched_attns)}"
+        assert stock_attns, "no stock WindowAttention modules found"
+
+        for _, stock_attn in stock_attns:
+            lp_attn = LpWindowAttention(
+                dim=stock_attn.dim,
+                num_heads=stock_attn.num_heads,
+                window_size=stock_attn.window_size,
+                qkv_bias=stock_attn.qkv.bias is not None,
+                attn_drop=stock_attn.attn_drop.p,
+                proj_drop=stock_attn.proj_drop.p,
+                lp_cfg=LpQKNormConfig(p=2.0),
+            )
+            _copy_weights(stock_attn, lp_attn)
+
+            assert torch.equal(stock_attn.qkv.weight, lp_attn.qkv.weight)
+            assert torch.equal(stock_attn.proj.weight, lp_attn.proj.weight)
+            assert torch.equal(
+                stock_attn.relative_position_bias_table.data,
+                lp_attn.relative_position_bias_table.data,
+            )
+            if stock_attn.qkv.bias is not None:
+                assert torch.equal(stock_attn.qkv.bias, lp_attn.qkv.bias)
+
+    def test_build_swin_unetr_lp_preserves_module_topology(self) -> None:
+        """Every stock WindowAttention slot must be occupied by an
+        LpWindowAttention with matching dim / num_heads / window_size /
+        qkv_bias, even after the post-patching re-initialization."""
+        from monai.networks.nets import SwinUNETR
+        from monai.networks.nets.swin_unetr import (
+            WindowAttention as MonaiWindowAttention,
         )
 
-        for p_name, p_mod in patched_attns:
-            s_name = p_name  # same path in the module tree
-            assert s_name in stock_weights, f"No matching stock weights for {p_name}"
-            ref = stock_weights[s_name]
+        torch.manual_seed(123)
+        stock = SwinUNETR(
+            in_channels=1, out_channels=2, feature_size=24, spatial_dims=2
+        )
+        stock_shapes = {
+            n: (m.dim, m.num_heads, tuple(m.window_size), m.qkv.bias is not None)
+            for n, m in stock.named_modules()
+            if isinstance(m, MonaiWindowAttention)
+        }
 
-            assert torch.equal(ref["qkv.weight"], p_mod.qkv.weight), (
-                f"qkv.weight mismatch at {s_name}"
-            )
-            assert torch.equal(ref["proj.weight"], p_mod.proj.weight), (
-                f"proj.weight mismatch at {s_name}"
-            )
-            assert torch.equal(
-                ref["rpb"],
-                p_mod.relative_position_bias_table.data,
-            ), f"relative_position_bias_table mismatch at {s_name}"
-            if "qkv.bias" in ref and p_mod.qkv.bias is not None:
-                assert torch.equal(ref["qkv.bias"], p_mod.qkv.bias), (
-                    f"qkv.bias mismatch at {s_name}"
-                )
+        torch.manual_seed(123)
+        patched = build_swin_unetr_lp(**_build_kwargs(), lp_cfg=LpQKNormConfig(p=2.0))
+        patched_shapes = {
+            n: (m.dim, m.num_heads, tuple(m.window_size), m.qkv.bias is not None)
+            for n, m in patched.named_modules()
+            if isinstance(m, LpWindowAttention)
+        }
+        assert stock_shapes == patched_shapes, (
+            "Module topology drift after patching: "
+            f"stock keys={set(stock_shapes)}, patched keys={set(patched_shapes)}"
+        )
 
 
 @pytest.mark.integration

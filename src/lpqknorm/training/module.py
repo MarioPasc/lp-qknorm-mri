@@ -39,6 +39,7 @@ from lpqknorm.training.metrics import (
 
 
 if TYPE_CHECKING:
+    from lpqknorm.models.init import AlphaInitScheme, InitScheme
     from lpqknorm.models.lp_qknorm import LpQKNormConfig
     from lpqknorm.training.logging import StructuredLogger
 
@@ -66,12 +67,33 @@ class ModelConfig:
     feature_size : int
         Base embedding dimension.  Must be divisible by 12 (MONAI
         constraint).  Default ``24``.
+    init_scheme : {"scratch_trunc_normal", "pretrained_ssl"}
+        Weight-initialization regime.  Default ``"scratch_trunc_normal"``
+        (primary from-scratch run).  ``"pretrained_ssl"`` loads the Tang
+        et al. (2022) SSL checkpoint and is reserved for the single
+        ablation row.
+    linear_init_std : float
+        Standard deviation of the truncated-normal used for ``nn.Linear``,
+        ``nn.Conv{2,3}d``, and ``relative_position_bias_table`` weights.
+        Default ``0.02`` per Swin (Liu et al., 2021) and ViT
+        (Dosovitskiy et al., 2021).
+    alpha_init_scheme : {"log_dk", "sqrt_dk", "fixed"}
+        Scheme for initializing ``LpQKNorm.alpha_raw``.  Default
+        ``"log_dk"``: at ``p = 2`` this recovers the Henry et al. (2020)
+        logit scale ``alpha <q_hat, k_hat> in [-log d_k, log d_k]``.
+    alpha_init_fixed : float or None
+        Required iff ``alpha_init_scheme == "fixed"``; ignored otherwise.
+        Must be ``> 0``.
     """
 
     img_size: tuple[int, int] = (224, 224)
     in_channels: int = 1
     out_channels: int = 1
     feature_size: int = 24
+    init_scheme: InitScheme = "scratch_trunc_normal"
+    linear_init_std: float = 0.02
+    alpha_init_scheme: AlphaInitScheme = "log_dk"
+    alpha_init_fixed: float | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +201,10 @@ class LpSegmentationModule(pl.LightningModule):
             out_channels=self.model_cfg.out_channels,
             feature_size=self.model_cfg.feature_size,
             lp_cfg=lp_cfg,
+            init_scheme=self.model_cfg.init_scheme,
+            linear_init_std=self.model_cfg.linear_init_std,
+            alpha_init_scheme=self.model_cfg.alpha_init_scheme,
+            alpha_init_fixed=self.model_cfg.alpha_init_fixed,
         )
 
         # Loss

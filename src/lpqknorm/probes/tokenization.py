@@ -123,3 +123,48 @@ def compute_logits_with_bias(capture: AttentionCapture) -> Tensor:
         msg = "capture.relative_position_bias is None"
         raise ValueError(msg)
     return capture.logits + capture.relative_position_bias
+
+
+def window_boundary_distance(
+    lesion_flags: Tensor,
+    window_size: int,
+) -> Tensor:
+    """Min-distance from each lesion token to its window's boundary.
+
+    For a lesion query at intra-window coordinates ``(ry, rx)`` inside a
+    ``W x W`` window, returns
+
+        d_wb = min(ry, W - 1 - ry, rx, W - 1 - rx)   ∈ {0, ..., floor((W-1)/2)}.
+
+    A value of 0 means the token sits on the window edge; larger values
+    mean it is deeper inside the window.
+
+    Parameters
+    ----------
+    lesion_flags : Tensor
+        Shape ``(B*nW, W²)`` bool — per-token lesion flags after window
+        partition.  Only rows with at least one ``True`` contribute.
+    window_size : int
+        Window side length ``W``.
+
+    Returns
+    -------
+    Tensor
+        Shape ``(N_lesion_tokens_aggregated_across_windows,)`` dtype
+        ``int8``.  Order: matches
+        ``lesion_flags.reshape(-1).nonzero().squeeze(-1)`` — i.e. raster
+        scan of ``(window_idx, intra_idx)``.
+    """
+    w = window_size
+    intra = torch.arange(w * w, device=lesion_flags.device)
+    ry = intra // w
+    rx = intra % w
+    dist = torch.minimum(
+        torch.minimum(ry, w - 1 - ry),
+        torch.minimum(rx, w - 1 - rx),
+    ).to(torch.int8)  # (W²,)
+
+    # Broadcast to (B*nW, W²) and pick only lesion positions.
+    bnw = lesion_flags.shape[0]
+    dist_full = dist.unsqueeze(0).expand(bnw, -1)
+    return dist_full[lesion_flags]

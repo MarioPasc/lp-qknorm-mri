@@ -28,6 +28,10 @@ class ProbeResult:
         Shape ``(N_tokens,)`` — metrics defined at every token.
     per_query : Tensor or None
         Shape ``(N_queries,)`` — metrics defined per query row.
+    per_block : dict[str, Tensor] or None
+        Block-level outputs keyed by name.  Used by Probes 7 (per-head
+        vectors) and 8 (spectral scalars and eigenvalue vectors), which
+        do not reduce to a single per-token or per-query tensor.
     metadata : dict
         Scalar summaries, counters, and auxiliary arrays.
     """
@@ -35,6 +39,7 @@ class ProbeResult:
     name: str
     per_token: Tensor | None = None
     per_query: Tensor | None = None
+    per_block: dict[str, Tensor] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

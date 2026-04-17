@@ -40,6 +40,10 @@ class HookError(LpQKNormError):
     """Attention hook registration or capture failure."""
 
 
+class LpInitError(LpQKNormError):
+    """Weight initialization failure (invalid scheme, missing target, etc.)."""
+
+
 # --- Data exceptions (Phase 1 placeholders) ---
 
 

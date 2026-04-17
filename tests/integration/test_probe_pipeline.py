@@ -25,7 +25,10 @@ from lpqknorm.probes import (
     FeaturePeakiness,
     LesionAttentionMass,
     LesionBackgroundLogitGap,
+    LinearProbe,
     ProbeRecorder,
+    SpatialLocalizationError,
+    SpectralProbe,
 )
 
 
@@ -56,7 +59,7 @@ def _build_dm() -> MockAtlasDataModule:
 
 
 def _all_probes() -> list[object]:
-    """Return all six probe instances."""
+    """Return all eight probe instances."""
     return [
         FeaturePeakiness("q"),
         FeaturePeakiness("k"),
@@ -64,6 +67,9 @@ def _all_probes() -> list[object]:
         LesionAttentionMass(),
         LesionBackgroundLogitGap(),
         AttentionMaskIoU(),
+        SpatialLocalizationError(),
+        LinearProbe(n_splits=3, min_samples_per_class=5),
+        SpectralProbe(min_samples=4),
     ]
 
 
@@ -110,9 +116,31 @@ class TestProbeRecorderEndToEnd:
                 assert "alpha" in grp
                 assert float(grp["alpha"][()]) > 0
 
+                # New Phase-4 keys (Probes 6, 7, 8 + controls).
+                for key in [
+                    "spatial_localization_error",
+                    "lp_balanced_accuracy",
+                    "lp_weight_sparsity",
+                    "lp_margin",
+                    "pr_lesion",
+                    "pr_background",
+                    "eigenvalues_lesion",
+                    "eigenvalues_background",
+                    "rel_pos_bias",
+                    "rel_pos_bias_entropy",
+                    "attention_full",
+                    "logits_full",
+                ]:
+                    assert key in grp, f"{key} missing from {block}"
+
             # Metadata attributes
             assert f["metadata"].attrs["epoch_tag"] == "test"
             assert f["metadata"].attrs["window_size"] == 7
+
+            # /inputs group with image, mask, subject_id, slice_index.
+            assert "inputs" in f
+            for key in ("image", "mask", "subject_id", "slice_index"):
+                assert key in f["inputs"]
 
 
 class TestProbeDeterminism:
@@ -180,3 +208,72 @@ class TestNoAutogradRetention:
         with h5py.File(path) as f:
             arr = f["block_0_wmsa/peakiness_q"][()]
             assert arr.dtype == np.float32
+
+
+class TestFloat16RoundTrip:
+    """AT10: float16 storage of attention preserves row-sum and entropy."""
+
+    def test_attention_row_sum_and_entropy_preserved(self, tmp_path: Path) -> None:
+        model = _build_model()
+        model.eval()
+        dm = _build_dm()
+        recorder = ProbeRecorder(
+            probes=_all_probes(),
+            output_dir=tmp_path,
+            n_probe_samples=2,
+        )
+        out = recorder.run(model, dm.val_dataloader(), epoch_tag="fp16", device="cpu")
+        with h5py.File(out) as f:
+            attn = f["block_0_wmsa/attention_full"][()]
+            assert attn.dtype == np.float16
+            # Row sums close to 1.
+            row_sum = attn.astype(np.float32).sum(axis=-1)
+            assert np.allclose(row_sum, 1.0, atol=1e-2)
+
+            # Entropy recomputed from fp16 attention vs stored fp32 entropy.
+            safe = np.clip(attn.astype(np.float32), 1e-9, None)
+            h16 = -(safe * np.log(safe)).sum(axis=-1)
+            h_stored = f["block_0_wmsa/entropy"][()]
+            # Median abs relative error is small.
+            rel = np.abs(h16.ravel()[: h_stored.shape[0]] - h_stored) / (
+                np.abs(h_stored) + 1e-6
+            )
+            assert np.median(rel) < 5e-3
+
+
+class TestAlphaLoggerAT11:
+    """AT11: AlphaLogger produces strictly increasing steps."""
+
+    def test_alpha_log_monotonic(self, tmp_path: Path) -> None:
+        import json
+
+        from lpqknorm.training.callbacks import AlphaLogger
+
+        class _FakeTrainer:
+            global_step = 0
+            current_epoch = 0
+
+        class _FakeModule:
+            def __init__(self, model: torch.nn.Module) -> None:
+                self.model = model
+
+        model = _build_model()
+        trainer = _FakeTrainer()
+        mod = _FakeModule(model)
+        cb = AlphaLogger(run_dir=tmp_path, p_value=3.0, fold=0)
+        cb.on_fit_start(trainer, mod)  # type: ignore[arg-type]
+        for s in range(5):
+            trainer.global_step = s
+            cb.on_train_batch_end(trainer, mod, None, None, s)  # type: ignore[arg-type]
+
+        jsonl = tmp_path / "probes" / "alpha_trajectory.jsonl"
+        assert jsonl.exists()
+        records = [json.loads(line) for line in jsonl.read_text().splitlines()]
+        assert len(records) > 0
+        steps = [r["step"] for r in records]
+        # Steps are non-decreasing (two blocks per step → equal pairs).
+        from itertools import pairwise
+
+        assert all(b >= a for a, b in pairwise(steps))
+        # Alpha values are finite and positive.
+        assert all(r["alpha"] > 0 for r in records)

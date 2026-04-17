@@ -54,16 +54,30 @@
 - [ ] `tests/integration/test_resume.py`
 
 ## Phase 4 — Probes
-- [ ] `src/lpqknorm/probes/base.py`
-- [ ] `src/lpqknorm/probes/peakiness.py`
-- [ ] `src/lpqknorm/probes/entropy.py`
-- [ ] `src/lpqknorm/probes/lesion_mass.py`
-- [ ] `src/lpqknorm/probes/logit_gap.py`
-- [ ] `src/lpqknorm/probes/attention_iou.py`
-- [ ] `src/lpqknorm/probes/recorder.py`
-- [ ] `src/lpqknorm/cli/probe.py`
-- [ ] `tests/unit/test_probes_synthetic.py`
-- [ ] `tests/integration/test_probe_pipeline.py`
+- [X] `src/lpqknorm/probes/base.py` (with `per_block` result field)
+- [X] `src/lpqknorm/probes/peakiness.py` — Probe 1
+- [X] `src/lpqknorm/probes/entropy.py` — Probe 2
+- [X] `src/lpqknorm/probes/lesion_mass.py` — Probe 3
+- [X] `src/lpqknorm/probes/logit_gap.py` — Probe 4
+- [X] `src/lpqknorm/probes/attention_iou.py` — Probe 5
+- [X] `src/lpqknorm/probes/spatial_loc_error.py` — Probe 6 (SLE, NEW)
+- [X] `src/lpqknorm/probes/linear_probe.py` — Probe 7 (L1-logistic, NEW)
+- [X] `src/lpqknorm/probes/spectral.py` — Probe 8 (PR / stable rank, NEW)
+- [X] `src/lpqknorm/probes/attention_maps.py` — reconstruction, rollout, overlay (NEW)
+- [X] `src/lpqknorm/probes/patching.py` — `PatchingConfig`, `ActivationPatcher` (NEW)
+- [X] `src/lpqknorm/probes/tokenization.py` — + `window_boundary_distance`
+- [X] `src/lpqknorm/probes/recorder.py` — full HDF5 schema: `/metadata`, `/inputs`,
+      `/block_0_wmsa`, `/block_1_swmsa` with attention/logits maps, rel-pos bias
+      and entropy, per-head linear-probe metrics, spectral scalars + eigenvalues
+- [X] `src/lpqknorm/cli/probe.py` — includes Probes 6–8 in default list
+- [X] `src/lpqknorm/cli/patching.py` — standalone post-hoc patching CLI (NEW)
+- [X] `src/lpqknorm/training/callbacks.py` — `AlphaLogger`, `PatchingCallback` (NEW)
+- [X] `tests/unit/test_probes_synthetic.py` — AT1 (Probes 1–6) + AT2 logit-gap
+- [X] `tests/unit/test_tokenization.py` — AT3, AT4, window-boundary distance
+- [X] `tests/unit/test_attention_maps.py` — AT8 identity rollout & reconstruction (NEW)
+- [X] `tests/unit/test_patching.py` — AT9 self-patch identity + cross-model delta (NEW)
+- [X] `tests/integration/test_probe_pipeline.py` — AT5 (full HDF5), AT6 determinism,
+      AT7 no-autograd, AT10 fp16 round-trip, AT11 α-log monotonicity
 
 ## Phase 5 — Analysis
 - [ ] `src/lpqknorm/analysis/aggregation.py`
