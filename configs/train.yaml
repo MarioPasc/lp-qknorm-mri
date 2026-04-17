@@ -8,5 +8,6 @@ run_dir: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/results/p_sweep_v1"
 
 data:
   cache_root: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/data"
+  h5_path: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/data/brats_men.h5"
   fold: 0
   use_mock: false

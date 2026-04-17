@@ -51,6 +51,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output directory for HDF5 file and QC artifacts",
     )
     parser.add_argument("--n-folds", type=int, default=3)
+    parser.add_argument(
+        "--fixed-test-patients",
+        type=int,
+        default=100,
+        help=(
+            "Number of patients to hold out as a common test set shared by "
+            "all folds.  Set to 0 to use the legacy rotating-test scheme."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=20260216)
     parser.add_argument(
         "--target-spacing",
@@ -156,6 +165,9 @@ def main() -> None:
         seed=args.seed,
         expected_n_subjects=len(records),
         patient_id_extractor=pid_extractor,
+        fixed_test_patients=(
+            args.fixed_test_patients if args.fixed_test_patients > 0 else None
+        ),
     )
 
     elapsed = time.perf_counter() - t0

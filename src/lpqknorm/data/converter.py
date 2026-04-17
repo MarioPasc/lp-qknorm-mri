@@ -194,6 +194,7 @@ def write_standardized_h5(
     seed: int = 20260216,
     expected_n_subjects: int | None = None,
     patient_id_extractor: Callable[[str], str] | None = None,
+    fixed_test_patients: int | None = None,
 ) -> Path:
     """Write a standardized HDF5 file from an iterable of preprocessed volumes.
 
@@ -216,6 +217,11 @@ def write_standardized_h5(
     patient_id_extractor : callable or None
         Function ``(subject_id: str) -> str`` extracting patient ID from
         subject ID.  Defaults to identity (subject_id == patient_id).
+    fixed_test_patients : int or None
+        If set, number of patients to hold out as a common test set shared
+        across every fold; the k-fold then rotates only train/val on the
+        remaining patients.  ``None`` preserves the legacy rotating-test
+        scheme.
 
     Returns
     -------
@@ -375,6 +381,7 @@ def write_standardized_h5(
             patient_ids_arr,
             strata_labels,
             n_folds=n_folds,
+            fixed_test_patients=fixed_test_patients,
             seed=seed,
         )
 
@@ -455,6 +462,13 @@ def write_standardized_h5(
         sp.attrs["seed"] = seed
         sp.attrs["stratified_by"] = "volume_stratum"
         sp.attrs["split_hash"] = split_hash
+        sp.attrs["scheme"] = (
+            "common_test_holdout"
+            if fixed_test_patients is not None
+            else "rotating_test"
+        )
+        if fixed_test_patients is not None:
+            sp.attrs["fixed_test_patients"] = int(fixed_test_patients)
 
         for fold in folds:
             fg = sp.create_group(f"fold_{fold.fold_idx}")

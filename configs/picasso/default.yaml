@@ -1,0 +1,58 @@
+# Picasso-specific path overrides for the Lp-QKNorm sweep.
+#
+# Consumed by `scripts/slurm/launch.sh`, which parses these values and
+# forwards them as Hydra CLI overrides to `lpqknorm-train` on each SLURM
+# array task.  Keep this file free of host-local assumptions other than
+# the Picasso filesystem layout documented below.
+#
+# Filesystem layout on Picasso (tic_163_uma / user: mpascual):
+#   $HOME             = /mnt/home/users/tic_163_uma/mpascual
+#   $FSCRATCH         = /mnt/home/users/tic_163_uma/mpascual/fscratch
+#   $EXECS            = /mnt/home/users/tic_163_uma/mpascual/execs
+#
+# Absolute paths are used throughout because SLURM workers inherit only
+# the exported environment and the compute-node filesystem is shared.
+
+paths:
+  # Repository checkout (editable install target)
+  repo_src: /mnt/home/users/tic_163_uma/mpascual/fscratch/repos/lp-qknorm-mri
+
+  # Standardized HDF5 produced by `lpqknorm-preprocess --fixed-test-patients 100`
+  h5_path: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/lpqknorm/brats_men.h5
+
+  # Run-directory root — one subtree per experiment, per p, per fold
+  run_dir: /mnt/home/users/tic_163_uma/mpascual/execs/lpqknorm_mri/p_sweep_v1
+
+  # Conda environment holding the editable install
+  conda_env: lpqknorm
+
+experiment:
+  name: p_sweep_v1
+
+sweep:
+  # Sweep axes — mirrored in scripts/slurm/launch.sh.  Order is fixed:
+  # SLURM_ARRAY_TASK_ID = p_idx * n_folds + fold_idx
+  #
+  # 6 p-values × 3 folds = 18 array tasks (one GPU each).
+  # p=2.0 is the primary baseline (Henry et al. QKNorm); p∈{1, 1.5} probes
+  # the sub-Euclidean regime; p∈{2.5, 3, 4} probes the super-Euclidean
+  # regime predicted to exhibit an interior maximum in small-lesion recall.
+  p_values: ["1.0", "1.5", "2.0", "2.5", "3.0", "4.0"]
+  folds: [0, 1, 2]
+
+training:
+  # Picasso compute-node defaults — override the lab-workstation values.
+  num_workers: 16
+  precision: bf16-mixed
+  batch_size: 16
+  seed: 20260216
+
+slurm:
+  # Resource envelope per array task (one GPU, one p-fold pair).
+  partition: gpu
+  gres: "gpu:1"
+  cpus_per_task: 16
+  mem: 64G
+  time: "1-00:00:00"
+  # Optional node constraint (leave empty to let SLURM choose).
+  constraint: ""
