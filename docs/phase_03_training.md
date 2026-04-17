@@ -18,6 +18,19 @@ This phase assumes Phases 1 and 2 have passed their acceptance tests. It
 produces the Lightning module, callbacks, CLI, and SLURM submission
 scaffolding.
 
+**Dataset-agnostic design.** The training code never references ATLAS
+directly. It reads the standardized HDF5 header
+(`DatasetHeader.from_h5()`) to discover `n_modalities` (→ `in_channels`),
+`n_label_classes` (→ `out_channels`), and `dataset_name` (→ logging
+labels). Switching from ATLAS to BraTS requires only changing
+`data.h5_path` in the Hydra config — no code changes.
+
+**2D/3D support.** The `spatial_mode` config key selects slice-level
+(`"2d"`) or volume-level (`"3d"`) training. The model builder uses the
+same key to set `spatial_dims` on `SwinUNETR`. The current study uses
+`spatial_mode="2d"` with `lesion_only=true`; future 3D experiments
+change only these two settings.
+
 ## Principle: log everything, aggregate later
 
 The cost of writing a few extra MB to disk per run is trivial compared to
@@ -176,19 +189,32 @@ All values are overridable via Hydra CLI.
 2. **Class imbalance in BCE.** Compute `pos_weight` from the training set at
    DataModule setup time and inject it into the loss. Document the
    resulting value in the run manifest.
-3. **Sampler choice.** Slices-with-lesion-only dataset, so no need for
-   positive-oversampling. Verify by inspecting the manifest.
+3. **Sampler choice.** In 2D mode with `lesion_only=True`, every slice
+   has a lesion — no positive oversampling needed. In 3D mode or 2D with
+   `lesion_only=False`, some samples may lack lesions; consider a weighted
+   sampler. Verify by inspecting the HDF5 slice manifest.
 4. **Wandb vs. local-only logging.** Default to **local-only** (JSONL +
    parquet) because Picasso compute nodes may lack outbound network access.
    Make W&B opt-in via `training.wandb.enabled=false` default.
+5. **Multi-class loss for non-binary datasets.** When
+   `header.n_label_classes > 1` (e.g., BraTS), the compound loss must
+   handle per-class weighting. The current BCE+Dice formulation works
+   per-channel for multi-class masks stored as K binary channels.
 
 ## Public API (`src/lpqknorm/training/`)
 
 ```python
 # module.py
 class LpSegmentationModule(pl.LightningModule):
-    def __init__(self, model_cfg: ModelConfig, lp_cfg: LpQKNormConfig,
-                 training_cfg: TrainingConfig) -> None: ...
+    """Dataset-agnostic segmentation module.
+
+    Reads in_channels, out_channels, and spatial_dims from the
+    DatasetHeader so the same code trains on ATLAS (1ch in, 1ch out, 2D)
+    or BraTS (4ch in, 3ch out, 3D) without modification.
+    """
+    def __init__(self, header: DatasetHeader, lp_cfg: LpQKNormConfig,
+                 training_cfg: TrainingConfig,
+                 spatial_mode: Literal["2d", "3d"] = "2d") -> None: ...
     def training_step(self, batch, batch_idx): ...
     def validation_step(self, batch, batch_idx): ...
     def test_step(self, batch, batch_idx): ...

@@ -22,9 +22,24 @@ analytical objects that go into the preprint:
 6. Correlation between probe trajectories and segmentation gains across
    patients: does "attention lands more on my lesion" predict "my lesion is
    segmented better"?
+7. **Cross-dataset p* vs. lesion size** — if multiple datasets have been
+   run, plot p* (per stratum) as a function of median lesion volume across
+   datasets. This tests whether the optimal Lp parameter systematically
+   varies with lesion size across pathologies, or whether the effect is
+   dataset-specific.
 
 This phase is **purely offline** — no GPU required. It should run in under
 5 minutes on a laptop against the full `results/` directory.
+
+**Multi-dataset support.** The analysis code reads the `dataset_name` from
+each run's manifest (or from the HDF5 header path). When results span
+multiple datasets (ATLAS, BraTS, MELD, etc.), figures and tables are
+stratified by dataset. The cross-dataset analysis enables the secondary
+research question: **does the relationship between optimal p and lesion
+size generalize across pathologies?** Specifically, if small-stratum p*
+differs from large-stratum p* within ATLAS, and a similar pattern appears
+in BraTS or MELD, the Lp normalization mechanism is pathology-general
+rather than stroke-specific.
 
 ## Principle: every figure is reproducible from a single command
 

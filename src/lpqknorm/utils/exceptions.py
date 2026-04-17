@@ -53,3 +53,14 @@ class SplitLeakageError(LpQKNormError):
 
 class StratificationError(LpQKNormError):
     """Stratification failed (empty stratum, impossible allocation)."""
+
+
+# --- Schema / converter exceptions ---
+
+
+class SchemaValidationError(LpQKNormError):
+    """HDF5 file does not conform to the v1.0 schema."""
+
+
+class ConverterError(LpQKNormError):
+    """Dataset converter encountered an unrecoverable error."""

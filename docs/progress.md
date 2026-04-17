@@ -17,18 +17,21 @@
 - [X] Install editable package (`pip install -e ".[dev]"`)
 
 ## Phase 1 — Data Pipeline
-- [ ] `src/lpqknorm/utils/exceptions.py`
+- [ ] `src/lpqknorm/utils/exceptions.py` (add SchemaValidationError, ConverterError)
 - [ ] `src/lpqknorm/utils/seeding.py`
-- [ ] `src/lpqknorm/data/atlas.py`
-- [ ] `src/lpqknorm/data/preprocessing.py`
+- [ ] `src/lpqknorm/data/schema.py` (DatasetHeader, validate_h5)
+- [ ] `src/lpqknorm/data/converter.py` (DatasetConverter protocol, SubjectRecord, SubjectVolume, write_standardized_h5)
+- [ ] `src/lpqknorm/data/converters/__init__.py` (converter registry)
+- [ ] `src/lpqknorm/data/converters/atlas.py` (AtlasConverter)
 - [ ] `src/lpqknorm/data/stratification.py`
 - [ ] `src/lpqknorm/data/splits.py`
-- [ ] `src/lpqknorm/data/transforms.py`
-- [ ] `src/lpqknorm/data/datamodule.py`
+- [ ] `src/lpqknorm/data/transforms.py` (2D + 3D transforms)
+- [ ] `src/lpqknorm/data/datamodule.py` (SegmentationDataModule, dual-mode 2D/3D)
 - [ ] `src/lpqknorm/cli/preprocess.py`
+- [ ] `tests/unit/test_schema.py`
 - [ ] `tests/unit/test_splits.py`
 - [ ] `tests/unit/test_stratification.py`
-- [ ] `tests/fixtures/synthetic_atlas.py`
+- [ ] `tests/fixtures/synthetic_dataset.py` (5-patient generic fixture)
 
 ## Phase 2 — Model
 - [X] `src/lpqknorm/models/lp_qknorm.py`

@@ -1,12 +1,18 @@
-# Lp-QKNorm for Small-Lesion Segmentation (ATLAS v2.0)
+# Lp-QKNorm for Medical Image Segmentation
 
-Mechanistic study of generalized Lp query–key normalization inside windowed
-self-attention for 2D stroke-lesion segmentation. Extends the QKNorm scheme
-of Henry et al. (2020, arXiv:2010.04245) from `p = 2` (Euclidean) to a sweep
+Mechanistic study of generalized Lp query-key normalization inside windowed
+self-attention for medical image segmentation, with a focus on small-lesion
+detection. Extends the QKNorm scheme of Henry et al. (2020,
+arXiv:2010.04245) from `p = 2` (Euclidean) to a sweep
 `p ∈ {2.0, 2.5, 3.0, 3.5, 4.0}`, following the generalization proposed by
-López-Rubio et al. (2026, arXiv:2602.05006), and tests the hypothesis that
-`p > 2` improves attention concentration on small lesions. A vanilla softmax
-baseline (no QKNorm) is included to contextualise the Lp improvement.
+Lopez-Rubio et al. (2026, arXiv:2602.05006), and tests the hypothesis that
+`p > 2` improves attention concentration on small lesions.
+
+The pipeline supports **multiple datasets** (ATLAS stroke, BraTS glioma,
+MELD epilepsy, meningioma) via a standardized HDF5 format with
+dataset-specific converters, and **both 2D and 3D** training modes from
+the same preprocessed file. A vanilla softmax baseline (no QKNorm) is
+included to contextualise the Lp improvement.
 
 ## Scientific hypothesis
 
@@ -32,8 +38,9 @@ lp-qknorm-mri/
 │
 ├── configs/                          # Hydra configs
 │   ├── config.yaml                   # top-level
-│   ├── data/atlas_2d.yaml
-│   ├── model/swin_unetr_2d.yaml
+│   ├── data/atlas.yaml               # ATLAS converter + paths
+│   ├── data/brats.yaml               # BraTS converter + paths (placeholder)
+│   ├── model/swin_unetr.yaml         # spatial_dims, feature_size
 │   ├── model/lp_qknorm.yaml          # p, learnable alpha, eps
 │   ├── training/default.yaml
 │   ├── probes/default.yaml
@@ -51,12 +58,17 @@ lp-qknorm-mri/
 │   │
 │   ├── data/                         # Phase 1
 │   │   ├── __init__.py
-│   │   ├── atlas.py                  # ATLAS v2.0 discovery + metadata
-│   │   ├── preprocessing.py          # 2D slice extraction, intensity norm
+│   │   ├── schema.py                 # HDF5 format spec (DatasetHeader, validate_h5)
+│   │   ├── converter.py              # Abstract converter protocol + generic writer
+│   │   ├── converters/               # Dataset-specific converters
+│   │   │   ├── __init__.py           # converter registry
+│   │   │   ├── atlas.py              # ATLAS v2.0 stroke
+│   │   │   ├── brats.py              # BraTS glioma (placeholder)
+│   │   │   └── meld.py               # MELD FCD/epilepsy (placeholder)
 │   │   ├── splits.py                 # patient-level K-fold with stratification
 │   │   ├── stratification.py         # volume-based lesion strata
-│   │   ├── transforms.py             # MONAI transform compositions
-│   │   └── datamodule.py             # Lightning DataModule
+│   │   ├── transforms.py             # MONAI transform compositions (2D + 3D)
+│   │   └── datamodule.py             # Generic DataModule (2D/3D dual-mode)
 │   │
 │   ├── models/                       # Phase 2
 │   │   ├── __init__.py
@@ -162,12 +174,22 @@ conda create -n lpqknorm python=3.11 -y
 conda activate lpqknorm
 pip install -e .
 
-# 2. Data (Phase 1)
+# 2. Data (Phase 1) — preprocess any supported dataset
 bash scripts/download_atlas.sh /path/to/raw
-python -m lpqknorm.cli.preprocess data.raw_root=/path/to/raw
+python -m lpqknorm.cli.preprocess data.converter=atlas \
+    data.raw_root=/path/to/raw data.cache_root=/path/to/cache
 
-# 3. Train sweep (Phase 3) — locally or SLURM
+# 3. Train sweep (Phase 3) — 2D slices (default) or 3D volumes
 python -m lpqknorm.cli.train -m \
+    data.h5_path=/path/to/cache/atlas_v2.h5 \
+    data.spatial_mode=2d \
+    model.lp_qknorm.p=vanilla,2.0,2.5,3.0,3.5,4.0 \
+    training.fold=0,1,2
+
+# 3b. Train on a different dataset (same code, different config)
+python -m lpqknorm.cli.train -m \
+    data.h5_path=/path/to/cache/brats2024.h5 \
+    data.spatial_mode=3d \
     model.lp_qknorm.p=vanilla,2.0,2.5,3.0,3.5,4.0 \
     training.fold=0,1,2
 

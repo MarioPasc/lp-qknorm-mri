@@ -21,6 +21,16 @@ This phase assumes Phases 1–3 have passed their acceptance tests. It
 depends on the hook infrastructure defined in `src/lpqknorm/models/hooks.py`
 from Phase 2.
 
+**2D/3D note.** The probe math is identical for 2D and 3D — all probes
+operate on the flattened window token sequence regardless of spatial
+dimensionality. The only difference is the tokenization mapping
+(`mask_to_token_flags`): for 2D it maps `(B, 1, H, W)` masks to tokens
+via a 2D window partition; for 3D it maps `(B, 1, D, H, W)` via a 3D
+window partition. Both pathways must be implemented and tested, but the
+probe computation modules remain unchanged. The current study uses 2D
+probes on stage-1 attention; 3D probes are reserved for future 3D
+experiments.
+
 ## Mathematical definitions
 
 Let stage-1 contain `L` windowed-attention blocks, each producing attention

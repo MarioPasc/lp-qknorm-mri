@@ -5,9 +5,15 @@
 Produce a drop-in generalization of the QKNorm attention mechanism
 (*Henry et al., 2020, arXiv:2010.04245*) based on the Lp norm
 (*López-Rubio et al., 2026, arXiv:2602.05006*), and splice it into the
-windowed self-attention of MONAI's 2D `SwinUNETR` in a way that is
+windowed self-attention of MONAI's `SwinUNETR` in a way that is
 **numerically identical to the original QKNorm when `p = 2`** and
 architecturally unchanged everywhere else.
+
+The model must support both `spatial_dims=2` (2D slice-level training) and
+`spatial_dims=3` (3D volume-level training). The Phase 1 standardized HDF5
+stores complete 3D volumes; the DataModule's `spatial_mode` determines
+which input shape the model receives. The attention patching logic is
+identical for both — only the `SwinUNETR` constructor argument changes.
 
 This phase contains no training. It produces a module that is exercised by
 unit tests in isolation and in integration with a frozen-weights forward
@@ -52,12 +58,13 @@ applies, but the module must handle `p < 2` for unit tests and ablations.
 
 ## Open questions the agent must resolve before coding
 
-1. **Which class in MONAI holds the windowed attention for 2D SwinUNETR**.
-   Inspect `monai.networks.nets.SwinUNETR(spatial_dims=2, ...)` at runtime,
-   walk the module tree, and identify the attention module. As of MONAI
-   ≥ 1.3.0 this should be `monai.networks.blocks.patchembedding.WindowAttention`
-   or equivalent in `monai.networks.blocks.selfattention`. **Confirm**, do
-   not assume.
+1. **Which class in MONAI holds the windowed attention for SwinUNETR**.
+   Inspect both `monai.networks.nets.SwinUNETR(spatial_dims=2, ...)` and
+   `SwinUNETR(spatial_dims=3, ...)` at runtime, walk the module tree, and
+   identify the attention module. Confirm the same `WindowAttention` class
+   is used for both spatial dims (expected). As of MONAI ≥ 1.3.0 this should
+   be `monai.networks.blocks.patchembedding.WindowAttention` or equivalent
+   in `monai.networks.blocks.selfattention`. **Confirm**, do not assume.
 2. **The exact signature of that attention's forward pass**, specifically
    how it handles `qkv` projection, scaling (typically `head_dim ** -0.5`),
    softmax, and relative position bias. Record the canonical
@@ -105,14 +112,23 @@ class LpWindowAttention(nn.Module):
 
 # swin_unetr_lp.py
 def build_swin_unetr_lp(
-    img_size: tuple[int, int],
+    img_size: tuple[int, ...],
     in_channels: int,
     out_channels: int,
     feature_size: int,
+    spatial_dims: Literal[2, 3] = 2,
     lp_cfg: LpQKNormConfig | None = None,
     patch_base: Literal["monai"] = "monai",
 ) -> nn.Module:
-    """Build a 2D SwinUNETR with Lp-QKNorm attention.
+    """Build a SwinUNETR with Lp-QKNorm attention.
+
+    Supports both 2D (slice-level) and 3D (volume-level) via
+    ``spatial_dims``. The attention patching is identical for both;
+    only the SwinUNETR constructor argument changes.
+
+    The ``in_channels`` and ``out_channels`` are read from the HDF5
+    header at training time (``header.n_modalities`` and
+    ``header.n_label_classes``), making the model dataset-agnostic.
 
     If ``lp_cfg`` is None, returns the stock MONAI SwinUNETR with
     unmodified WindowAttention (vanilla softmax baseline). This is the
@@ -244,19 +260,24 @@ Verify that `torch.autograd.gradcheck` passes for `_lp_normalize` with
 with `eps = 1e-6`. Skip `p = 1.0` (non-differentiable at zero crossings;
 not in the sweep).
 
-### 5. Drop-in compatibility
+### 5. Drop-in compatibility (2D and 3D)
 
 ```python
-def test_attention_shape_preserved():
+@pytest.mark.parametrize("spatial_dims,img_size,x_shape", [
+    (2, (224, 224), (2, 1, 224, 224)),
+    (3, (96, 96, 96), (1, 1, 96, 96, 96)),
+])
+def test_attention_shape_preserved(spatial_dims, img_size, x_shape):
     model_stock = monai.networks.nets.SwinUNETR(
-        img_size=(224, 224), in_channels=1, out_channels=1,
-        feature_size=24, spatial_dims=2,
+        img_size=img_size, in_channels=1, out_channels=1,
+        feature_size=24, spatial_dims=spatial_dims,
     )
     model_lp = build_swin_unetr_lp(
-        img_size=(224, 224), in_channels=1, out_channels=1,
-        feature_size=24, lp_cfg=LpQKNormConfig(p=3.0),
+        img_size=img_size, in_channels=1, out_channels=1,
+        feature_size=24, spatial_dims=spatial_dims,
+        lp_cfg=LpQKNormConfig(p=3.0),
     )
-    x = torch.randn(2, 1, 224, 224)
+    x = torch.randn(*x_shape)
     assert model_stock(x).shape == model_lp(x).shape
 ```
 

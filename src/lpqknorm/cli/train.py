@@ -108,10 +108,10 @@ def main(cfg: DictConfig) -> None:
             )
         )
     else:
-        from lpqknorm.data.datamodule import AtlasSliceDataModule
+        from lpqknorm.data.datamodule import SegmentationDataModule
 
-        dm = AtlasSliceDataModule(
-            cache_root=Path(cfg.data.cache_root),
+        dm = SegmentationDataModule(
+            h5_path=Path(cfg.data.h5_path),
             fold=cfg.data.fold,
             batch_size=cfg.training.batch_size,
             num_workers=cfg.training.num_workers,

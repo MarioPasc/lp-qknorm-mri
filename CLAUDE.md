@@ -3,17 +3,22 @@
 ## Project Identity
 
 This repository implements a **mechanistic study** of generalized Lp query-key
-normalization inside windowed self-attention for 2D stroke-lesion segmentation
-on ATLAS v2.0. It is **not** a new segmentation method — it is a controlled
-experiment isolating the effect of the Lp norm parameter `p` on attention
-concentration for small lesions.
+normalization inside windowed self-attention for medical image segmentation,
+with a focus on small-lesion detection. It is **not** a new segmentation
+method — it is a controlled experiment isolating the effect of the Lp norm
+parameter `p` on attention concentration for small lesions.
+
+The pipeline supports **multiple datasets** (ATLAS stroke, BraTS glioma,
+MELD epilepsy, meningioma) via a standardized HDF5 format with
+dataset-specific converters, and **both 2D and 3D** training from the same
+preprocessed file.
 
 - **Author:** Mario Pascual González (Health Engineering / Bioinformatics, UMA)
 - **Research group:** Grupo de Inteligencia Computacional y Análisis de Imagen (GIC-AIA), UMA
 - **Clinical collaborator:** IBIMA-BIONAND
 - **License:** MIT
-- **Dataset:** ATLAS v2.0 (Liew et al., Scientific Data 2022)
-- **Architecture:** 2D Swin-UNETR (MONAI) with patched windowed attention
+- **Primary dataset:** ATLAS v2.0 (Liew et al., Scientific Data 2022)
+- **Architecture:** Swin-UNETR (MONAI, 2D or 3D) with patched windowed attention
 
 ## Scientific Hypothesis
 
@@ -71,7 +76,14 @@ Always prefix commands with the conda environment python:
 
 ```
 src/lpqknorm/           # Main package (editable install)
-  data/                 # Phase 1: ATLAS v2.0 pipeline, splits, stratification
+  data/                 # Phase 1: Standardized HDF5 format, converters, DataModule
+    schema.py           #   HDF5 format spec (DatasetHeader, validate_h5)
+    converter.py        #   Abstract converter protocol + generic writer
+    converters/         #   Dataset-specific converters (atlas, brats, meld, ...)
+    splits.py           #   Patient-level stratified k-fold
+    stratification.py   #   Volume-based lesion strata
+    transforms.py       #   MONAI transforms (2D + 3D)
+    datamodule.py       #   Generic dual-mode DataModule (2D/3D)
   models/               # Phase 2: LpQKNorm, LpWindowAttention, patched SwinUNETR
   training/             # Phase 3: LightningModule, losses, metrics, callbacks
   probes/               # Phase 4: Five mechanistic probes + recorder
@@ -83,7 +95,7 @@ configs/                # Hydra configuration hierarchy
 scripts/                # SLURM submission, download, environment verification
 tests/unit/             # Isolated module tests
 tests/integration/      # End-to-end pipeline tests
-tests/fixtures/         # Synthetic ATLAS cohort (5 patients)
+tests/fixtures/         # Synthetic dataset (5 patients)
 docs/                   # Phase specifications (read-only reference)
 ```
 
@@ -93,20 +105,25 @@ Work through phases in order. **Do not start phase N+1 until phase N's
 acceptance tests pass.**
 
 1. **Phase 1 — Data Pipeline** (`docs/phase_01_data.md`)
-   Deliverables: `data/`, `cli/preprocess.py`, `utils/exceptions.py`, `utils/seeding.py`
-   Output: single `atlas_2d.h5` (all lesion-bearing slices, chunked + gzip)
-   + `manifest.parquet` + patient-level splits + strata.
-   **Lesion-only:** background slices are discarded (mechanistic focus).
-   Tests: `test_splits.py`, `test_stratification.py`
+   Deliverables: `data/schema.py`, `data/converter.py`, `data/converters/atlas.py`,
+   `data/datamodule.py`, `cli/preprocess.py`, `utils/exceptions.py`, `utils/seeding.py`
+   Output: single `{dataset}.h5` (standardized HDF5, complete 3D volumes,
+   self-describing header) + patient-level splits + strata inside the H5.
+   **Multi-dataset:** converter architecture; ATLAS first, others added later.
+   **Dual-mode:** same file supports 2D slice and 3D volume loading.
+   Tests: `test_splits.py`, `test_stratification.py`, `test_schema.py`
 
 2. **Phase 2 — Model** (`docs/phase_02_model.md`)
    Deliverables: `models/lp_qknorm.py`, `models/attention.py`,
    `models/swin_unetr_lp.py`, `models/hooks.py`
+   Supports `spatial_dims=2` and `spatial_dims=3`; reads `in_channels` and
+   `out_channels` from the HDF5 header for dataset-agnostic configuration.
    Tests: `test_lp_qknorm.py`, `test_attention_equivalence.py`, `test_forward_pass.py`
    **Critical test:** `p = 2` must recover original QKNorm exactly.
 
 3. **Phase 3 — Training** (`docs/phase_03_training.md`)
    Deliverables: `training/`, `cli/train.py`, `scripts/submit_sweep.sbatch`
+   Dataset-agnostic: reads HDF5 header to configure model and loss.
    Tests: `test_training_step.py`, `test_resume.py`
 
 4. **Phase 4 — Probes** (`docs/phase_04_probes.md`)
@@ -168,11 +185,19 @@ A = softmax(S^(p) + B_rel)
    logged. Re-training to collect a missing metric is unacceptable.
 6. **Relative position bias preserved.** The bias is added after the QK dot
    product, not absorbed into Q/K. Removing it conflates two effects.
-7. **Lesion-only dataset.** Every slice in `atlas_2d.h5` contains at least
-   `min_lesion_voxels_per_slice` lesion voxels. No background-only slices.
-   This is a deliberate design choice for mechanistic focus.
-8. **Single H5 file.** All preprocessed slices live in one `atlas_2d.h5`.
-   No per-patient files. Manifest row order matches H5 row order.
+7. **Self-describing HDF5.** Each `{dataset}.h5` stores complete 3D volumes
+   with a root-level header containing dataset name, label names, modalities,
+   and all preprocessing parameters. Lesion-only filtering for 2D training
+   happens at DataModule load time via the `/slices/has_lesion` flag — not
+   at storage time.
+8. **Single H5 per dataset.** All preprocessed volumes for one dataset live
+   in one `{dataset_name}.h5`. No per-patient files. The `/slices/` manifest
+   row order matches `/data/` row order.
+9. **Dataset-agnostic downstream code.** Training, probes, and analysis code
+   must never reference a specific dataset (e.g., "atlas") — they read the
+   HDF5 header (`DatasetHeader.from_h5()`) to discover `n_modalities`,
+   `n_label_classes`, `dataset_name`, etc. Only converter code is
+   dataset-specific.
 
 ## Code Conventions
 
