@@ -49,10 +49,13 @@ training:
 
 slurm:
   # Resource envelope per array task (one GPU, one p-fold pair).
-  partition: gpu
+  # Picasso's default partition is used when `partition` is empty — the
+  # MenGrowth reference workflow confirmed that passing `--partition=gpu`
+  # is rejected on this cluster.  Node selection is done via `constraint`
+  # (dgx = A100 nodes with CUDA-capable GPUs).
+  partition: ""
   gres: "gpu:1"
   cpus_per_task: 16
   mem: 64G
   time: "1-00:00:00"
-  # Optional node constraint (leave empty to let SLURM choose).
-  constraint: ""
+  constraint: "dgx"

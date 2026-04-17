@@ -167,18 +167,28 @@ PY
 ARRAY_MAX=$(( N_TASKS - 1 ))
 JOB_NAME="lpqk_${EXPERIMENT_NAME}"
 
+# Build sbatch args.  --partition, --constraint, --export are only added
+# when they are explicitly set in the Picasso config; Picasso's default
+# partition (and submission environment via --export=ALL) is otherwise
+# used.  All sweep parameters are exported to the worker via --export=ALL
+# because (a) they are already in the login-shell environment from the
+# earlier `export` block, and (b) P_VALUES contains spaces, which would
+# be ambiguous inside a comma-separated --export= value.
 SBATCH_ARGS=(
     --array="0-${ARRAY_MAX}"
     --job-name="${JOB_NAME}"
-    --partition="${SLURM_PARTITION}"
     --gres="${SLURM_GRES}"
     --cpus-per-task="${SLURM_CPUS}"
     --mem="${SLURM_MEM}"
     --time="${SLURM_TIME}"
     --output="${SLURM_LOG_DIR}/${JOB_NAME}_%A_%a.out"
     --error="${SLURM_LOG_DIR}/${JOB_NAME}_%A_%a.err"
-    --export=ALL,REPO_SRC="${REPO_SRC}",CONDA_ENV_NAME="${CONDA_ENV_NAME}",H5_PATH="${H5_PATH}",RUN_DIR="${RUN_DIR}",P_VALUES="${P_VALUES}",N_FOLDS="${N_FOLDS}",SEED="${SEED}",NUM_WORKERS="${NUM_WORKERS}",BATCH_SIZE="${BATCH_SIZE}",PRECISION="${PRECISION}",EXPERIMENT_NAME="${EXPERIMENT_NAME}"
+    --export=ALL
 )
+
+if [ -n "${SLURM_PARTITION}" ]; then
+    SBATCH_ARGS+=( --partition="${SLURM_PARTITION}" )
+fi
 
 if [ -n "${SLURM_CONSTRAINT}" ]; then
     SBATCH_ARGS+=( --constraint="${SLURM_CONSTRAINT}" )
@@ -187,23 +197,46 @@ fi
 SBATCH_ARGS+=( "${SCRIPT_DIR}/train_worker.sh" )
 
 echo "Submitting array job ($N_TASKS tasks)..."
-echo "  sbatch ${SBATCH_ARGS[*]}"
-echo ""
+printf '  sbatch'
+for a in "${SBATCH_ARGS[@]}"; do printf ' %q' "$a"; done
+printf '\n\n'
 
 if [ "${DRY_RUN}" -eq 1 ]; then
     echo "[dry-run] Not submitting; the map is in ${MAP_FILE}"
     exit 0
 fi
 
-SUBMIT_OUT=$(sbatch "${SBATCH_ARGS[@]}" 2>&1)
-echo "  ${SUBMIT_OUT}"
+# Capture sbatch output + exit status without pipefail tripping on us.
+SBATCH_LOG="${SLURM_LOG_DIR}/sbatch_submit_$(date +%Y%m%dT%H%M%S).log"
+set +e
+SUBMIT_OUT="$(sbatch "${SBATCH_ARGS[@]}" 2>&1)"
+SBATCH_RC=$?
+set -e
 
-JOB_ID=$(echo "${SUBMIT_OUT}" | grep -oP 'job\s+\K[0-9]+' | head -1)
-if [ -z "${JOB_ID}" ]; then
-    JOB_ID=$(echo "${SUBMIT_OUT}" | grep -oP '[0-9]+' | head -1)
+# Always print + persist the raw sbatch output.  This used to be lost when
+# the subsequent grep-pipeline failed under `set -o pipefail`.
+echo "----- sbatch output (rc=${SBATCH_RC}) -----"
+printf '%s\n' "${SUBMIT_OUT}"
+echo "----- end sbatch output -----"
+printf '%s\n' "${SUBMIT_OUT}" > "${SBATCH_LOG}"
+echo "(saved to ${SBATCH_LOG})"
+
+if [ "${SBATCH_RC}" -ne 0 ]; then
+    echo "[FAIL] sbatch returned exit code ${SBATCH_RC}"
+    exit "${SBATCH_RC}"
 fi
+
+# Extract job ID robustly.  Keep pipefail off for the extraction so a
+# missing pattern doesn't kill the script without a diagnostic.
+set +o pipefail
+JOB_ID="$(printf '%s\n' "${SUBMIT_OUT}" | grep -oE 'job[[:space:]]+[0-9]+' | head -1 | grep -oE '[0-9]+' || true)"
 if [ -z "${JOB_ID}" ]; then
-    echo "[FAIL] Could not extract job ID from sbatch output"
+    JOB_ID="$(printf '%s\n' "${SUBMIT_OUT}" | grep -oE '[0-9]+' | head -1 || true)"
+fi
+set -o pipefail
+
+if [ -z "${JOB_ID}" ]; then
+    echo "[FAIL] Could not extract job ID from sbatch output (see ${SBATCH_LOG})"
     exit 1
 fi
 
