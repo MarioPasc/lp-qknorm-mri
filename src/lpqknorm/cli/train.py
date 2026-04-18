@@ -267,3 +267,7 @@ def main(cfg: DictConfig) -> None:
     trainer.test(module, dm)
     s_logger.close()
     logger.info("Training complete. Artefacts at %s", run_dir)
+
+
+if __name__ == "__main__":
+    main()

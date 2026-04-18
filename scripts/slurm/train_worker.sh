@@ -124,10 +124,19 @@ echo "=========================================="
 echo "TRAINING ${P_TAG} fold=${FOLD}"
 echo "=========================================="
 
+# Pin Hydra's output directory into the run tree so train.log is findable
+# (otherwise Hydra writes to outputs/YYYY-MM-DD/HH-MM-SS/ under CWD).
+HYDRA_DIR="${RUN_DIR}/hydra_logs/${P_TAG}_f${FOLD}_${SLURM_JOB_ID}"
+mkdir -p "${HYDRA_DIR}"
+echo "Hydra output dir: ${HYDRA_DIR}"
+
+# Force unbuffered Python so prints/log lines reach SLURM .out in real time,
+# and merge stderr into stdout so errors are visible in a single stream.
 # Disable errexit around training so a non-zero rc is captured, the GPU
 # monitor is stopped cleanly, and the final summary is still printed.
+export PYTHONUNBUFFERED=1
 set +e
-python -m lpqknorm.cli.train \
+python -u -m lpqknorm.cli.train \
     experiment="${EXPERIMENT_NAME}" \
     "${P_OVERRIDE}" \
     data.fold="${FOLD}" \
@@ -137,9 +146,22 @@ python -m lpqknorm.cli.train \
     training.seed="${SEED}" \
     training.num_workers="${NUM_WORKERS}" \
     training.batch_size="${BATCH_SIZE}" \
-    training.precision="${PRECISION}"
+    training.precision="${PRECISION}" \
+    hydra.run.dir="${HYDRA_DIR}" \
+    2>&1
 TRAIN_RC=$?
 set -e
+
+# Surface Hydra's own log in the SLURM .out so silent failures stop being
+# silent.  Every @hydra.main run writes train.log; if the job died during
+# config composition, the traceback lives there (not on stdout).
+if [ -f "${HYDRA_DIR}/train.log" ]; then
+    echo "----- hydra train.log (tail 200) -----"
+    tail -n 200 "${HYDRA_DIR}/train.log" || true
+    echo "----- end train.log -----"
+else
+    echo "[warn] No hydra train.log found at ${HYDRA_DIR}"
+fi
 
 # Stop GPU monitor
 if [ -n "${GPU_MONITOR_PID:-}" ] && kill -0 "${GPU_MONITOR_PID}" 2>/dev/null; then
