@@ -103,7 +103,7 @@ PY
 : "${REPO_SRC:?}" "${H5_PATH:?}" "${RUN_DIR_BASE:?}" "${CONDA_ENV_NAME:?}"
 : "${P_VALUES:?}" "${N_FOLDS:?}" "${N_TASKS:?}"
 
-RUN_DIR="${RUN_DIR_BASE}"
+export RUN_DIR="${RUN_DIR_BASE}"
 SLURM_LOG_DIR="${RUN_DIR}/logs"
 
 # On a dry-run we never try to touch the Picasso-only filesystem, so the
@@ -195,6 +195,22 @@ if [ -n "${SLURM_CONSTRAINT}" ]; then
 fi
 
 SBATCH_ARGS+=( "${SCRIPT_DIR}/train_worker.sh" )
+
+# Verify every variable the worker expects is actually exported (not just
+# set in the launcher's shell).  `sbatch --export=ALL` only propagates the
+# caller's *environment*; plain shell assignments do not cross the boundary.
+WORKER_REQUIRED=(
+    REPO_SRC CONDA_ENV_NAME H5_PATH RUN_DIR
+    P_VALUES N_FOLDS SEED NUM_WORKERS
+    BATCH_SIZE PRECISION EXPERIMENT_NAME
+)
+for v in "${WORKER_REQUIRED[@]}"; do
+    if ! env | grep -q "^${v}="; then
+        echo "[FAIL] Worker variable '${v}' is set in the shell but not exported;"
+        echo "       sbatch --export=ALL will not propagate it to the compute node."
+        exit 1
+    fi
+done
 
 echo "Submitting array job ($N_TASKS tasks)..."
 printf '  sbatch'
