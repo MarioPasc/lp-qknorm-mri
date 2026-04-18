@@ -25,6 +25,10 @@ START_TIME=$(date +%s)
 # -----------------------------------------------------------------------------
 # Resolve (p, fold) from the array task ID.
 # -----------------------------------------------------------------------------
+if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    echo "[FAIL] SLURM_ARRAY_TASK_ID is unset; this worker must be submitted as a job array."
+    exit 1
+fi
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
 read -r -a P_ARR <<< "${P_VALUES}"
 N_FOLDS_INT=$(( N_FOLDS + 0 ))
@@ -120,6 +124,9 @@ echo "=========================================="
 echo "TRAINING ${P_TAG} fold=${FOLD}"
 echo "=========================================="
 
+# Disable errexit around training so a non-zero rc is captured, the GPU
+# monitor is stopped cleanly, and the final summary is still printed.
+set +e
 python -m lpqknorm.cli.train \
     experiment="${EXPERIMENT_NAME}" \
     "${P_OVERRIDE}" \
@@ -131,8 +138,8 @@ python -m lpqknorm.cli.train \
     training.num_workers="${NUM_WORKERS}" \
     training.batch_size="${BATCH_SIZE}" \
     training.precision="${PRECISION}"
-
 TRAIN_RC=$?
+set -e
 
 # Stop GPU monitor
 if [ -n "${GPU_MONITOR_PID:-}" ] && kill -0 "${GPU_MONITOR_PID}" 2>/dev/null; then
