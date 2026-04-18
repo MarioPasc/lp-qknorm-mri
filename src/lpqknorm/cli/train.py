@@ -118,11 +118,34 @@ def main(cfg: DictConfig) -> None:
         )
     dm.setup("fit")
 
+    # --- Derive channel counts from the dataset header (invariant #9) ---
+    # Downstream code must read n_modalities / n_label_classes from the HDF5
+    # header rather than a hardcoded config default (which only matches the
+    # ATLAS binary case).  For mock data we keep the config values.
+    in_channels = int(cfg.model.in_channels)
+    out_channels = int(cfg.model.out_channels)
+    if not cfg.data.use_mock:
+        header = dm.header  # type: ignore[attr-defined]
+        if in_channels != header.n_modalities:
+            logger.info(
+                "Overriding model.in_channels: cfg=%d -> header.n_modalities=%d",
+                in_channels,
+                header.n_modalities,
+            )
+            in_channels = int(header.n_modalities)
+        if out_channels != header.n_label_classes:
+            logger.info(
+                "Overriding model.out_channels: cfg=%d -> header.n_label_classes=%d",
+                out_channels,
+                header.n_label_classes,
+            )
+            out_channels = int(header.n_label_classes)
+
     # --- Configs ---
     model_cfg = ModelConfig(
         img_size=tuple(cfg.model.img_size),
-        in_channels=cfg.model.in_channels,
-        out_channels=cfg.model.out_channels,
+        in_channels=in_channels,
+        out_channels=out_channels,
         feature_size=cfg.model.feature_size,
         init_scheme=cfg.model.get("init_scheme", "scratch_trunc_normal"),
         linear_init_std=float(cfg.model.get("linear_init_std", 0.02)),
@@ -252,6 +275,10 @@ def main(cfg: DictConfig) -> None:
 
     # --- Trainer ---
     precision = training_cfg.precision if torch.cuda.is_available() else "32"
+    # Optional smoke-test limits: keep the primary sweep runs untouched but
+    # allow local CLI-driven truncation via `+training.limit_train_batches=N`.
+    limit_train_batches = cfg.training.get("limit_train_batches", 1.0)
+    limit_val_batches = cfg.training.get("limit_val_batches", 1.0)
     trainer = pl.Trainer(
         max_epochs=training_cfg.max_epochs,
         precision=precision,  # type: ignore[arg-type]
@@ -261,6 +288,8 @@ def main(cfg: DictConfig) -> None:
         deterministic=True,
         accumulate_grad_batches=cfg.training.get("accumulate_grad_batches", 1),
         default_root_dir=str(run_dir),
+        limit_train_batches=limit_train_batches,
+        limit_val_batches=limit_val_batches,
     )
 
     trainer.fit(module, dm)

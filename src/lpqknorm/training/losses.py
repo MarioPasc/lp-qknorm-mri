@@ -59,6 +59,11 @@ class CompoundSegLoss(nn.Module):
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
+        # Reshape a 1D (K,) per-class pos_weight to (K, 1, 1) so it broadcasts
+        # correctly against (B, K, H, W) logits/targets.  Without this, a
+        # (K,) tensor aligns with the trailing width dim and errors.
+        if pos_weight is not None and pos_weight.dim() == 1 and pos_weight.numel() > 1:
+            pos_weight = pos_weight.view(-1, 1, 1)
         self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.dice = DiceLoss(sigmoid=True, smooth_nr=1e-5, smooth_dr=1e-5)
 

@@ -38,6 +38,24 @@ def _pin_memory_available() -> bool:
         return False
 
 
+def _safe_mp_context(num_workers: int) -> str | None:
+    """Pick a fork-safe multiprocessing context for DataLoader workers.
+
+    When CUDA is initialized in the parent process (which Lightning does
+    before iterating the train DataLoader, e.g. by moving the module and
+    its buffers to GPU), forking a worker inherits a corrupted CUDA state
+    and the first destructor of a CUDA-backed tensor aborts with
+    ``CUDA error: initialization error``.  ``spawn`` re-imports the module
+    in the worker and avoids the issue.  On CPU-only runs the default
+    context is fine.
+    """
+    if num_workers <= 0:
+        return None
+    if torch.cuda.is_available():
+        return "spawn"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal HDF5-backed dataset
 # ---------------------------------------------------------------------------
@@ -355,6 +373,7 @@ class SegmentationDataModule(pl.LightningDataModule):
             persistent_workers=self.num_workers > 0,
             worker_init_fn=seed_worker,
             generator=g,
+            multiprocessing_context=_safe_mp_context(self.num_workers),
         )
 
     def val_dataloader(self) -> DataLoader:  # type: ignore[type-arg]
@@ -375,6 +394,7 @@ class SegmentationDataModule(pl.LightningDataModule):
             pin_memory=_pin_memory_available(),
             persistent_workers=self.num_workers > 0,
             worker_init_fn=seed_worker,
+            multiprocessing_context=_safe_mp_context(self.num_workers),
         )
 
     def test_dataloader(self) -> DataLoader:  # type: ignore[type-arg]
@@ -395,6 +415,7 @@ class SegmentationDataModule(pl.LightningDataModule):
             pin_memory=_pin_memory_available(),
             persistent_workers=self.num_workers > 0,
             worker_init_fn=seed_worker,
+            multiprocessing_context=_safe_mp_context(self.num_workers),
         )
 
 

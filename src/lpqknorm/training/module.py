@@ -363,12 +363,14 @@ class LpSegmentationModule(pl.LightningModule):
             if strata[i] == "small" and not math.isnan(det.lesion_recall):
                 small_recalls.append(det.lesion_recall)
 
-        if small_recalls:
-            self.log(
-                "val_lesion_recall_small",
-                float(np.mean(small_recalls)),
-                on_epoch=True,
-            )
+        # Always log val_lesion_recall_small so ModelCheckpoint(monitor=...) can
+        # see it every epoch (NaN when no small-stratum patient is in the batch;
+        # PL aggregates over the epoch and handles NaN safely).
+        self.log(
+            "val_lesion_recall_small",
+            float(np.mean(small_recalls)) if small_recalls else float("nan"),
+            on_epoch=True,
+        )
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         """Test step: compute metrics and accumulate per-patient rows.
