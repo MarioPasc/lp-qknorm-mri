@@ -58,6 +58,16 @@ as *references* (not clones) for efficient hook access:
 Callers that need detached, cloned copies (e.g., ``AttentionHookRegistry``)
 should call ``.clone().detach()`` on each captured tensor.
 
+Capture gating
+--------------
+The ``self._capture_enabled`` flag (default ``True``) gates the population
+of ``self._capture``.  During training the top-level
+:class:`~lpqknorm.training.module.LpSegmentationModule` disables captures
+on every :class:`LpWindowAttention` to avoid pinning the autograd
+sub-graph across ``backward()`` calls (which was the dominant memory leak
+in earlier builds).  Probes and callbacks that need intermediates enable
+the flag — and register hooks — for the scope of a capture event only.
+
 References
 ----------
 - Henry et al. *Query-Key Normalization for Transformers*. EMNLP 2020.
@@ -109,7 +119,37 @@ def _make_trunc_normal() -> Any:
 
 _trunc_normal_ = _make_trunc_normal()
 
-__all__ = ["LpWindowAttention"]
+__all__ = ["LpWindowAttention", "set_capture_enabled"]
+
+
+def set_capture_enabled(model: nn.Module, enabled: bool) -> int:
+    """Enable or disable capture on every :class:`LpWindowAttention` in ``model``.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Any ``nn.Module``; the function recursively walks the submodule tree
+        via ``model.modules()``.
+    enabled : bool
+        Target value for ``_capture_enabled``.  When ``False``, the capture
+        dict is also cleared so that previously-pinned tensors become
+        garbage-collectable immediately.
+
+    Returns
+    -------
+    int
+        Number of :class:`LpWindowAttention` modules touched.  Useful for
+        unit tests and for log messages in the training CLI.
+    """
+    n = 0
+    for m in model.modules():
+        if isinstance(m, LpWindowAttention):
+            m._capture_enabled = bool(enabled)
+            if not enabled:
+                m._capture = {}
+            n += 1
+    return n
+
 
 logger = logging.getLogger(__name__)
 
@@ -276,9 +316,15 @@ class LpWindowAttention(nn.Module):
         # ------------------------------------------------------------------ #
         self.lp_qknorm = LpQKNorm(lp_cfg)
 
-        # Capture dict for hook access — populated by forward().
-        # Keys: q, k, q_hat, k_hat, alpha, logits, attention.
+        # Capture dict for hook access — populated by forward() only when
+        # ``self._capture_enabled`` is True.  Default is True to preserve the
+        # standalone-forward behaviour exercised by the unit tests; during
+        # training the segmentation module flips this flag off on every
+        # LpWindowAttention instance to prevent activation retention across
+        # backward() calls.  AttentionHookRegistry toggles it locally around
+        # capture events.
         self._capture: dict[str, Tensor] = {}
+        self._capture_enabled: bool = True
 
         logger.debug(
             "LpWindowAttention initialised: dim=%d, num_heads=%d, window_size=%s, p=%.2f",
@@ -329,6 +375,14 @@ class LpWindowAttention(nn.Module):
         """
         b, n, c = x.shape
 
+        # Reset capture dict on every forward so stale references from a
+        # previous call cannot outlive the current forward.  When capture
+        # is disabled the dict is kept empty, which means no intermediate
+        # activation is pinned past ``backward()``.
+        capture = self._capture_enabled
+        if self._capture:
+            self._capture = {}
+
         # ------------------------------------------------------------------ #
         # QKV projection and head splitting — identical to MONAI               #
         # ------------------------------------------------------------------ #
@@ -340,8 +394,9 @@ class LpWindowAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]  # each (b, num_heads, n, head_dim)
 
         # Store raw Q and K for probe access before any normalisation.
-        self._capture["q"] = q
-        self._capture["k"] = k
+        if capture:
+            self._capture["q"] = q
+            self._capture["k"] = k
 
         # ------------------------------------------------------------------ #
         # === REPLACEMENT: Lp-QKNorm instead of q * scale =================== #
@@ -356,10 +411,11 @@ class LpWindowAttention(nn.Module):
         # ------------------------------------------------------------------ #
 
         # Store Lp-normalised vectors, scale, and pre-bias logits.
-        self._capture["q_hat"] = q_hat
-        self._capture["k_hat"] = k_hat
-        self._capture["alpha"] = alpha
-        self._capture["logits"] = attn  # BEFORE relative position bias
+        if capture:
+            self._capture["q_hat"] = q_hat
+            self._capture["k_hat"] = k_hat
+            self._capture["alpha"] = alpha
+            self._capture["logits"] = attn  # BEFORE relative position bias
 
         # ------------------------------------------------------------------ #
         # Relative position bias — identical to MONAI                         #
@@ -373,7 +429,10 @@ class LpWindowAttention(nn.Module):
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1
         ).contiguous()  # (num_heads, n, n)
-        self._capture["relative_position_bias"] = relative_position_bias.unsqueeze(0)
+        if capture:
+            self._capture["relative_position_bias"] = relative_position_bias.unsqueeze(
+                0
+            )
         attn = attn + relative_position_bias.unsqueeze(0)
 
         # ------------------------------------------------------------------ #
@@ -390,7 +449,8 @@ class LpWindowAttention(nn.Module):
             attn = self.softmax(attn)
 
         # Store post-softmax attention weights for probe access.
-        self._capture["attention"] = attn
+        if capture:
+            self._capture["attention"] = attn
 
         # ------------------------------------------------------------------ #
         # Value aggregation and output projection — identical to MONAI        #

@@ -135,6 +135,11 @@ echo "Hydra output dir: ${HYDRA_DIR}"
 # Disable errexit around training so a non-zero rc is captured, the GPU
 # monitor is stopped cleanly, and the final summary is still printed.
 export PYTHONUNBUFFERED=1
+# Reduce CUDA allocator fragmentation.  The PyTorch OOM message explicitly
+# recommends this setting and it pairs well with activation checkpointing
+# on A100 40 GB, where the caching allocator tends to leave a few GB
+# reserved-but-unallocated after the first high-water mark.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 set +e
 python -u -m lpqknorm.cli.train \
     experiment="${EXPERIMENT_NAME}" \
@@ -147,6 +152,8 @@ python -u -m lpqknorm.cli.train \
     training.num_workers="${NUM_WORKERS}" \
     training.batch_size="${BATCH_SIZE}" \
     training.precision="${PRECISION}" \
+    training.accumulate_grad_batches="${ACCUMULATE_GRAD_BATCHES:-1}" \
+    model.use_checkpoint="${USE_CHECKPOINT:-false}" \
     hydra.run.dir="${HYDRA_DIR}" \
     2>&1
 TRAIN_RC=$?

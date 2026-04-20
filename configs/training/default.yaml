@@ -14,3 +14,8 @@ gradient_log_every_n_steps: 50
 bce_weight: 0.5
 dice_weight: 0.5
 threshold: 0.5
+
+# Replace non-finite training losses with a zero leaf tensor so the
+# optimiser step is a no-op instead of poisoning every parameter with NaN.
+# Set false to restore the old behaviour (fail fast on NaN).
+skip_on_nonfinite_loss: true

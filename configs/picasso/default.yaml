@@ -42,11 +42,23 @@ sweep:
 
 training:
   # Picasso compute-node defaults — override the lab-workstation values.
-  num_workers: 16
+  # B=4 + accumulate=4 keeps the effective optimizer batch at 16 (matches the
+  # pre-OOM value) while halving the peak activation footprint.  bf16-mixed
+  # stays enabled; the fp32 islands around _lp_normalize and CompoundSegLoss
+  # keep the numerics stable for non-integer p without losing throughput.
+  num_workers: 8
   precision: bf16-mixed
-  batch_size: 8
-  accumulate_grad_batches: 2
+  batch_size: 4
+  accumulate_grad_batches: 4
   seed: 20260216
+
+model:
+  # Activation checkpointing is mandatory on the 40 GB A100 at 224^2 once
+  # the attention-capture leak is removed.  Roughly 30-40 % activation
+  # memory reduction for ~20 % wall-clock cost; confirmed safe for the
+  # probe pipeline because probes run under torch.no_grad() where no
+  # re-forward pass is triggered.
+  use_checkpoint: true
 
 slurm:
   # Resource envelope per array task (one GPU, one p-fold pair).

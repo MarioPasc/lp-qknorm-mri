@@ -155,6 +155,7 @@ def main(cfg: DictConfig) -> None:
             if cfg.model.get("alpha_init_fixed", None) is not None
             else None
         ),
+        use_checkpoint=bool(cfg.model.get("use_checkpoint", False)),
     )
     lp_cfg: LpQKNormConfig | None = (
         LpQKNormConfig(p=float(cfg.model.p)) if cfg.model.p is not None else None
@@ -171,6 +172,7 @@ def main(cfg: DictConfig) -> None:
         dice_weight=cfg.training.dice_weight,
         threshold=cfg.training.threshold,
         gradient_log_every_n_steps=cfg.training.gradient_log_every_n_steps,
+        skip_on_nonfinite_loss=bool(cfg.training.get("skip_on_nonfinite_loss", True)),
     )
 
     # --- Structured logger ---
@@ -279,13 +281,20 @@ def main(cfg: DictConfig) -> None:
     # allow local CLI-driven truncation via `+training.limit_train_batches=N`.
     limit_train_batches = cfg.training.get("limit_train_batches", 1.0)
     limit_val_batches = cfg.training.get("limit_val_batches", 1.0)
+    # ``deterministic="warn"`` keeps ``torch.use_deterministic_algorithms(True,
+    # warn_only=True)`` (already set above) but does NOT force
+    # ``cudnn.deterministic=True``, which would otherwise select
+    # memory-heavier and slower convolution algorithms.  The project seed
+    # policy is preserved (per-worker seeding via ``pl.seed_everything``); any
+    # op without a deterministic implementation emits a warning instead of
+    # raising, matching the intent documented in the run manifest.
     trainer = pl.Trainer(
         max_epochs=training_cfg.max_epochs,
         precision=precision,  # type: ignore[arg-type]
         gradient_clip_val=training_cfg.gradient_clip_val,
         callbacks=callbacks,
         logger=False,
-        deterministic=True,
+        deterministic="warn",
         accumulate_grad_batches=cfg.training.get("accumulate_grad_batches", 1),
         default_root_dir=str(run_dir),
         limit_train_batches=limit_train_batches,

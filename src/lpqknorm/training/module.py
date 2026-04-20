@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
-from lpqknorm.models.attention import LpWindowAttention
+from lpqknorm.models.attention import LpWindowAttention, set_capture_enabled
 from lpqknorm.models.swin_unetr_lp import build_swin_unetr_lp
 from lpqknorm.training.losses import CompoundSegLoss
 from lpqknorm.training.metrics import (
@@ -94,6 +94,7 @@ class ModelConfig:
     linear_init_std: float = 0.02
     alpha_init_scheme: AlphaInitScheme = "log_dk"
     alpha_init_fixed: float | None = None
+    use_checkpoint: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ class TrainingConfig:
     dice_weight: float = 0.5
     threshold: float = 0.5
     gradient_log_every_n_steps: int = 50
+    skip_on_nonfinite_loss: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,20 @@ class LpSegmentationModule(pl.LightningModule):
             linear_init_std=self.model_cfg.linear_init_std,
             alpha_init_scheme=self.model_cfg.alpha_init_scheme,
             alpha_init_fixed=self.model_cfg.alpha_init_fixed,
+            use_checkpoint=self.model_cfg.use_checkpoint,
+        )
+
+        # Disable the per-module ``_capture`` dict on every LpWindowAttention
+        # instance.  The capture dict pins references to ``q, k, q_hat,
+        # k_hat, logits, attention, relative_position_bias`` — all of which
+        # are intermediate activations whose autograd sub-graph would
+        # otherwise survive past ``backward()``.  Callbacks and probes that
+        # need the captures re-enable them locally via AttentionHookRegistry.
+        n_attn = set_capture_enabled(self.model, False)
+        logger.info(
+            "LpSegmentationModule: disabled capture on %d LpWindowAttention "
+            "module(s); probes/callbacks re-enable per event.",
+            n_attn,
         )
 
         # Loss
@@ -254,6 +270,30 @@ class LpSegmentationModule(pl.LightningModule):
         logits = self.model(images)
         loss_total: Tensor
         loss_total, loss_bce, loss_dice = self.loss_fn(logits, masks)
+
+        # Non-finite-loss guard.  Under bf16-mixed precision with Lp norms
+        # of non-integer p, a malformed micro-batch (e.g. a slice with an
+        # extreme logit magnitude) can still produce NaN/Inf even after the
+        # fp32 islands inside _lp_normalize and CompoundSegLoss.  If we
+        # forwarded the NaN through backward, AdamW would poison every
+        # parameter with NaN on the first optimiser step.  Instead we
+        # substitute a zero leaf tensor: backward runs (PL requires it),
+        # the optimiser sees all-zero gradients and performs a no-op step.
+        if self.training_cfg.skip_on_nonfinite_loss and not bool(
+            torch.isfinite(loss_total)
+        ):
+            logger.warning(
+                "Non-finite training loss at step=%d (bce=%s, dice=%s); "
+                "replacing with zero leaf and skipping parameter update.",
+                self.global_step,
+                float(loss_bce.detach().item())
+                if torch.isfinite(loss_bce)
+                else float("nan"),
+                float(loss_dice.detach().item())
+                if torch.isfinite(loss_dice)
+                else float("nan"),
+            )
+            loss_total = torch.zeros((), device=loss_total.device, requires_grad=True)
 
         # Collect alpha stats per stage (vanilla has no lp_qknorm)
         alpha_stats = self._collect_alpha_stats()
@@ -315,15 +355,18 @@ class LpSegmentationModule(pl.LightningModule):
         subject_ids: list[str] = batch["subject_id"]
         strata: list[str] = batch["volume_stratum"]
 
+        # Keep the entire validation step inside ``no_grad``.  Previously the
+        # loss was computed outside the no_grad scope, which built a short
+        # autograd graph that was dropped without backward — wasting memory
+        # proportional to the model depth during every validation batch.
         with torch.no_grad():
             logits = self.model(images)
-
-        loss_total, loss_bce, loss_dice = self.loss_fn(logits, masks)
+            loss_total, loss_bce, loss_dice = self.loss_fn(logits, masks)
 
         # Binary predictions
-        probs = torch.sigmoid(logits.detach())
+        probs = torch.sigmoid(logits)
         preds = (probs >= self.training_cfg.threshold).float()
-        target = masks.detach()
+        target = masks
 
         # Batch-level metrics
         dice = dice_score(preds, target)  # (B,)

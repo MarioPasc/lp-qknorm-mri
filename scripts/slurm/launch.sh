@@ -86,6 +86,8 @@ exports = {
     "SEED":            str(cfg.training.seed),
     "NUM_WORKERS":     str(cfg.training.num_workers),
     "BATCH_SIZE":      str(cfg.training.batch_size),
+    "ACCUMULATE_GRAD_BATCHES": str(cfg.training.get("accumulate_grad_batches", 1)),
+    "USE_CHECKPOINT":  str(bool(cfg.get("model", {}).get("use_checkpoint", False))).lower(),
     "PRECISION":       str(cfg.training.precision),
     "SLURM_PARTITION": str(cfg.slurm.partition),
     "SLURM_GRES":      str(cfg.slurm.gres),

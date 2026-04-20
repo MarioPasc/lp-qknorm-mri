@@ -378,40 +378,26 @@ class AttentionSummaryCallback(pl.Callback):
             capture_epochs if capture_epochs is not None else {1, 5, 10}
         )
         self._seed = seed
-        self._registry = AttentionHookRegistry()
+        # Registry is constructed on-demand inside _capture_and_write so that
+        # hooks fire ONLY during the capture events, not on every training
+        # forward.  Leaving the registry registered across training caused
+        # an unbounded leak: each training forward appended raw captures
+        # (references to activation tensors) into _raw_captures, pinning
+        # activation memory and the autograd sub-graph until fit end.
         self._fixed_batches: list[dict[str, Any]] | None = None
-        self._hooks_registered = False
-
-    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Register hooks on stage-0 LpWindowAttention modules."""
-        try:
-            model: torch.nn.Module = pl_module.model  # type: ignore[assignment]
-            self._registry.register(model, stages=[0])
-            self._hooks_registered = True
-            logger.info("AttentionSummaryCallback: hooks registered on stage-0.")
-        except Exception:
-            logger.warning(
-                "AttentionSummaryCallback: could not register hooks "
-                "(expected for vanilla baseline)."
-            )
-            self._hooks_registered = False
 
     def on_validation_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
         """Capture attention stats at configured epochs."""
-        if not self._hooks_registered:
-            return
         epoch = trainer.current_epoch + 1  # 1-indexed
         if epoch not in self._capture_epochs:
             return
         self._capture_and_write(trainer, pl_module, epoch_label=str(epoch))
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Capture final epoch and remove hooks."""
-        if self._hooks_registered:
-            self._capture_and_write(trainer, pl_module, epoch_label="final")
-            self._registry.remove()
+        """Capture the final epoch (no persistent hooks to clean up)."""
+        self._capture_and_write(trainer, pl_module, epoch_label="final")
 
     def _capture_and_write(
         self,
@@ -419,7 +405,13 @@ class AttentionSummaryCallback(pl.Callback):
         pl_module: pl.LightningModule,
         epoch_label: str,
     ) -> None:
-        """Run model on fixed batches and collect attention summary stats."""
+        """Run model on fixed batches and collect attention summary stats.
+
+        Hooks are registered for the scope of this method only and removed
+        in a ``finally`` block — crucial for memory: a leaked registry
+        accumulates one raw-capture entry per attention block per training
+        forward and pins the autograd sub-graph until fit end.
+        """
         val_loader = trainer.val_dataloaders
         if val_loader is None:
             return
@@ -435,51 +427,67 @@ class AttentionSummaryCallback(pl.Callback):
                 self._fixed_batches.append(batch)
             torch.set_rng_state(rng_state)
 
-        self._registry.clear()
+        model_fn: torch.nn.Module = pl_module.model  # type: ignore[assignment]
+
+        registry = AttentionHookRegistry()
+        try:
+            registry.register(model_fn, stages=[0])
+        except Exception:
+            # Vanilla baseline has no LpWindowAttention — quietly skip.
+            logger.warning(
+                "AttentionSummaryCallback: could not register hooks "
+                "(expected for vanilla baseline); skipping epoch=%s.",
+                epoch_label,
+            )
+            return
+
         rows: list[dict[str, Any]] = []
         pl_module.eval()
+        try:
+            with torch.no_grad():
+                for batch in self._fixed_batches:
+                    images = batch["image"].to(pl_module.device)
+                    _ = model_fn(images)
+                    captures = registry.captures()
+                    for cap in captures:
+                        if cap.attention is None:
+                            continue
+                        attn = cap.attention  # (B*nW, nh, n, n)
 
-        with torch.no_grad():
-            for batch in self._fixed_batches:
-                images = batch["image"].to(pl_module.device)
-                model_fn: torch.nn.Module = pl_module.model  # type: ignore[assignment]
-                _ = model_fn(images)
-                captures = self._registry.captures()
-                for cap in captures:
-                    if cap.attention is None:
-                        continue
-                    attn = cap.attention  # (B*nW, nh, n, n)
+                        # Entropy: H = -sum A_ij log A_ij
+                        attn_safe = attn.clamp(min=1e-9)
+                        entropy = -(attn_safe * attn_safe.log()).sum(-1)
 
-                    # Entropy: H = -sum A_ij log A_ij
-                    attn_safe = attn.clamp(min=1e-9)
-                    entropy = -(attn_safe * attn_safe.log()).sum(-1)  # (B*nW, nh, n)
+                        # Max prob per row
+                        mean_max_prob = float(attn.max(dim=-1).values.mean().item())
 
-                    # Max prob per row
-                    mean_max_prob = float(attn.max(dim=-1).values.mean().item())
+                        # Alpha
+                        alpha_val = (
+                            float(cap.alpha.item())
+                            if cap.alpha is not None
+                            else math.nan
+                        )
 
-                    # Alpha
-                    alpha_val = (
-                        float(cap.alpha.item()) if cap.alpha is not None else math.nan
-                    )
-
-                    rows.append(
-                        {
-                            "block_id": (
-                                f"stage{cap.stage_index}_block{cap.block_index}"
-                            ),
-                            "stage_index": cap.stage_index,
-                            "block_index": cap.block_index,
-                            "mean_entropy": float(entropy.mean().item()),
-                            "median_entropy": float(entropy.median().item()),
-                            "mean_max_prob": mean_max_prob,
-                            "alpha_value": alpha_val,
-                            # Phase 4 probes — NaN placeholders
-                            "mean_lesion_mass_on_lesion_queries": math.nan,
-                            "mean_q_peakiness": math.nan,
-                            "mean_k_peakiness": math.nan,
-                        }
-                    )
-                self._registry.clear()
+                        rows.append(
+                            {
+                                "block_id": (
+                                    f"stage{cap.stage_index}_block{cap.block_index}"
+                                ),
+                                "stage_index": cap.stage_index,
+                                "block_index": cap.block_index,
+                                "mean_entropy": float(entropy.mean().item()),
+                                "median_entropy": float(entropy.median().item()),
+                                "mean_max_prob": mean_max_prob,
+                                "alpha_value": alpha_val,
+                                # Phase 4 probes — NaN placeholders
+                                "mean_lesion_mass_on_lesion_queries": math.nan,
+                                "mean_q_peakiness": math.nan,
+                                "mean_k_peakiness": math.nan,
+                            }
+                        )
+                    registry.clear()
+        finally:
+            registry.remove()
 
         if not rows:
             logger.warning(

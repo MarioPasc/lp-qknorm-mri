@@ -16,3 +16,8 @@ init_scheme: scratch_trunc_normal
 linear_init_std: 0.02
 alpha_init_scheme: log_dk
 alpha_init_fixed: null
+
+# Activation checkpointing inside every SwinTransformerBlock.  Enable on
+# memory-constrained GPUs (40 GB A100 at 224^2, B>=4).  Trades ~20 %
+# wall-clock increase for ~30-40 % activation memory reduction.
+use_checkpoint: false

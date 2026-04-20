@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 
+import torch
 import torch.nn as nn
 from monai.losses import DiceLoss  # type: ignore[attr-defined]
 from torch import Tensor
@@ -86,7 +87,19 @@ class CompoundSegLoss(nn.Module):
         loss_dice : Tensor
             Scalar.  Dice component (before weighting).
         """
-        loss_bce = self.bce(logits, target)
-        loss_dice = self.dice(logits, target)
-        loss_total = self.bce_weight * loss_bce + self.dice_weight * loss_dice
+        # Disable autocast around BCE + Dice.  BCE-with-logits in bf16
+        # becomes unstable when |logits| grows (the log-sum-exp internals
+        # saturate) and MONAI's soft Dice uses 1e-5 smoothing which can
+        # underflow in bf16 (< 6e-5 smallest normal).  The loss cost is a
+        # tiny fraction of the forward, so fp32 evaluation is free in
+        # practice and removes a class of bf16 NaNs.
+        device_type = (
+            logits.device.type if logits.device.type in {"cuda", "cpu"} else "cpu"
+        )
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            logits_f32 = logits.float()
+            target_f32 = target.float()
+            loss_bce = self.bce(logits_f32, target_f32)
+            loss_dice = self.dice(logits_f32, target_f32)
+            loss_total = self.bce_weight * loss_bce + self.dice_weight * loss_dice
         return loss_total, loss_bce, loss_dice

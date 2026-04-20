@@ -77,6 +77,7 @@ def build_swin_unetr_lp(
     linear_init_std: float = 0.02,
     alpha_init_scheme: AlphaInitScheme = "log_dk",
     alpha_init_fixed: float | None = None,
+    use_checkpoint: bool = False,
 ) -> nn.Module:
     """Build a 2D SwinUNETR, optionally patched with Lp-QKNorm attention.
 
@@ -117,6 +118,13 @@ def build_swin_unetr_lp(
         et al., 2020).
     alpha_init_fixed : float or None
         Required iff ``alpha_init_scheme == "fixed"``.
+    use_checkpoint : bool
+        If ``True``, enable activation checkpointing inside every
+        ``SwinTransformerBlock`` (forwarded to
+        ``monai.networks.nets.SwinUNETR(use_checkpoint=...)``).  Trades
+        roughly a 20 % wall-clock increase for a 30–40 % activation
+        memory reduction during the backward pass.  Default ``False`` to
+        preserve the original behaviour for unit tests and small inputs.
 
     Returns
     -------
@@ -138,6 +146,7 @@ def build_swin_unetr_lp(
         out_channels=out_channels,
         feature_size=feature_size,
         spatial_dims=2,
+        use_checkpoint=use_checkpoint,
     )
 
     if lp_cfg is None:

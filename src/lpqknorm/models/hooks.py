@@ -144,6 +144,10 @@ class AttentionHookRegistry:
         # Each element is a dict with keys matching AttentionCapture fields
         # plus 'stage_index' and 'block_index'.
         self._raw_captures: list[dict[str, Tensor | int]] = []
+        # Modules on which we enabled ``_capture_enabled``.  Tracked so that
+        # :meth:`remove` can restore them to the disabled state that the
+        # training loop relies on to avoid activation retention.
+        self._armed_modules: list[LpWindowAttention] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,6 +265,14 @@ class AttentionHookRegistry:
 
                 handle = attn_module.register_forward_hook(_make_hook(_stage, _block))
                 self._hooks.append(handle)
+                # Arm the module: the forward() of LpWindowAttention
+                # populates ``self._capture`` only when
+                # ``_capture_enabled`` is True.  During training the
+                # segmentation module disables this flag globally, so the
+                # registry must flip it back on for the modules it probes
+                # and restore the disabled state in :meth:`remove`.
+                attn_module._capture_enabled = True
+                self._armed_modules.append(attn_module)
                 hooks_registered += 1
                 logger.debug(
                     "Registered hook on LpWindowAttention at stage=%d, block=%d.",
@@ -330,13 +342,20 @@ class AttentionHookRegistry:
         """Remove all registered hooks and clear accumulated captures.
 
         After calling this method the registry is in a clean initial state and
-        can be re-used by calling :meth:`register` again.
+        can be re-used by calling :meth:`register` again.  Modules that were
+        armed (``_capture_enabled=True``) during :meth:`register` are
+        restored to the disabled state, also emptying their capture dict so
+        the retained intermediates become garbage-collectable.
         """
         for handle in self._hooks:
             handle.remove()
         n_removed = len(self._hooks)
         self._hooks.clear()
         self._raw_captures.clear()
+        for module in self._armed_modules:
+            module._capture_enabled = False
+            module._capture = {}
+        self._armed_modules.clear()
         logger.debug("AttentionHookRegistry: removed %d hook(s).", n_removed)
 
 

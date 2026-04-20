@@ -141,6 +141,13 @@ def _lp_normalize(
     - **p < 2**: ``norm = (sum_h (|v_h| + eps)^p)^{1/p}`` (eps pre-absolute-value)
       Prevents gradient blow-up at zero-crossings for fractional exponents.
 
+    The norm is always evaluated in ``float32`` regardless of the caller's
+    autocast context.  For non-integer ``p`` (e.g. ``p=2.5``) the operations
+    ``|v|^p`` and ``(⋅)^{1/p}`` are numerically unstable under ``bfloat16``
+    (7-bit mantissa) and readily produce NaN/Inf that poisons the attention
+    logits.  Running the norm in fp32 adds negligible cost (~1 % of the
+    downstream QK matmul) and eliminates the mixed-precision NaN regime.
+
     Parameters
     ----------
     x : Tensor
@@ -157,8 +164,8 @@ def _lp_normalize(
     Returns
     -------
     Tensor
-        Tensor of the same shape as ``x``, with Lp norm along ``dim``
-        approximately equal to 1 (within ``eps`` tolerance).
+        Tensor of the same shape and dtype as ``x``, with Lp norm along
+        ``dim`` approximately equal to 1 (within ``eps`` tolerance).
 
     Notes
     -----
@@ -167,18 +174,35 @@ def _lp_normalize(
     standard L2-normalized form
     ``x / (x.norm(p=2, dim=dim, keepdim=True) + eps)`` to within 1e-7.
     """
-    if p >= 2.0:
-        # Post-root eps: (sum |v_h|^p)^{1/p} + eps.
-        # At p=2: norm = (sum v_h^2)^{1/2} + eps == ||v||_2 + eps,
-        # which is the exact Henry et al. reference formula.
-        norm = x.abs().pow(p).sum(dim=dim, keepdim=True).pow(1.0 / p) + eps
-    else:
-        # Pre-absolute-value eps: (sum (|v_h| + eps)^p)^{1/p}.
-        # Gradient: d/dv_h[(|v_h| + eps)^p] = p*(|v_h| + eps)^{p-1}*sign(v_h),
-        # which is bounded at v_h = 0 for all p >= 1.
-        norm = (x.abs() + eps).pow(p).sum(dim=dim, keepdim=True).pow(1.0 / p)
+    orig_dtype = x.dtype
+    device_type = x.device.type if x.device.type in {"cuda", "cpu"} else "cpu"
 
-    return x / norm
+    # Disable autocast around the pow/sum/pow chain so the operation runs in
+    # high precision even when the outer training loop is in bf16-mixed /
+    # fp16-mixed.  We up-cast bf16/fp16 inputs to fp32, but leave fp32/fp64
+    # inputs untouched to preserve gradcheck (double-precision) semantics.
+    if orig_dtype in (torch.bfloat16, torch.float16):
+        compute_dtype = torch.float32
+    else:
+        compute_dtype = orig_dtype
+
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x_c = x.to(compute_dtype)
+        if p >= 2.0:
+            # Post-root eps: (sum |v_h|^p)^{1/p} + eps.
+            # At p=2: norm = (sum v_h^2)^{1/2} + eps == ||v||_2 + eps,
+            # which is the exact Henry et al. reference formula.
+            norm = x_c.abs().pow(p).sum(dim=dim, keepdim=True).pow(1.0 / p) + eps
+        else:
+            # Pre-absolute-value eps: (sum (|v_h| + eps)^p)^{1/p}.
+            # Gradient: d/dv_h[(|v_h| + eps)^p] = p*(|v_h| + eps)^{p-1}*sign(v_h),
+            # which is bounded at v_h = 0 for all p >= 1.
+            norm = (x_c.abs() + eps).pow(p).sum(dim=dim, keepdim=True).pow(1.0 / p)
+        normed = x_c / norm
+
+    # Cast back to the caller's dtype so the subsequent q_hat @ k_hat.T runs
+    # in the expected (bf16/fp16) precision for throughput.
+    return normed.to(orig_dtype)
 
 
 # ---------------------------------------------------------------------------
