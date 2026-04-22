@@ -11,3 +11,7 @@ data:
   h5_path: "/media/mpascual/Sandisk2TB/research/lpqknorm_mri/data/brats_men.h5"
   fold: 0
   use_mock: false
+  # Augmentation OFF for the primary Lp sweep: RandAffine/RandGaussianNoise/
+  # RandBiasField/RandFlip add stochasticity that confounds the p-effect.
+  # Flip to true only for ablation rows that explicitly control for it.
+  augment: false

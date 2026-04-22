@@ -259,20 +259,125 @@ class PerPatientMetricsCallback(pl.Callback):
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
         """Collect per-patient rows from module buffer and flush."""
+        self._flush("val", trainer, pl_module)
+
+    def on_test_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        """Mirror of the validation flush, routed to the test parquet.
+
+        The test_step in :class:`LpSegmentationModule` writes to the same
+        ``_per_patient_buffer`` as validation; without this hook the buffer
+        would never reach ``metrics/test_per_patient.parquet`` and the
+        dice-vs-p stratified analysis would have no data.
+        """
+        self._flush("test", trainer, pl_module)
+
+    def _flush(
+        self,
+        stage: str,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
         buffer: list[dict[str, Any]] = getattr(pl_module, "_per_patient_buffer", [])
         if not buffer:
             return
-        # Snapshot and clear before flushing
         rows = list(buffer)
         buffer.clear()
         epoch = trainer.current_epoch
-        self._logger.log_per_patient("val", epoch, rows)
-        self._logger.flush_parquet("val_per_patient")
+        self._logger.log_per_patient(stage, epoch, rows)
+        self._logger.flush_parquet(f"{stage}_per_patient")
         logger.debug(
-            "PerPatientMetricsCallback: flushed %d rows at epoch %d",
+            "PerPatientMetricsCallback: flushed %d rows for stage=%s epoch=%d",
             len(rows),
+            stage,
             epoch,
         )
+
+
+# ---------------------------------------------------------------------------
+# TestPredictionWriter
+# ---------------------------------------------------------------------------
+
+
+class TestPredictionWriter(pl.Callback):
+    """Save a bounded sample of test-time predictions for visual QA.
+
+    Dumps the first ``max_batches`` test batches as compressed ``.npz``
+    files under ``run_dir/predictions/``.  Each file stores ``image``,
+    ``mask``, ``pred`` (binarised at ``threshold``) and ``prob`` tensors
+    plus the matching ``subject_id`` / ``volume_stratum`` arrays, so the
+    downstream dice-vs-p analysis can inspect prediction quality without
+    rerunning inference.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Per-run artefact directory.  Output lives under
+        ``run_dir / "predictions" / "test_batch_{idx:04d}.npz"``.
+    max_batches : int
+        Upper bound on the number of test batches written.  Default ``4``.
+
+    Notes
+    -----
+    The callback is intentionally bounded: a full-dataset dump would bloat
+    the run tree (each 2D ATLAS slice is 224×224 f32 → ~200 KB; 18 sweep
+    runs × 100 patients would reach ~1 GB per run).  For full predictions,
+    re-run inference with the saved checkpoint.
+    """
+
+    def __init__(self, run_dir: Path, max_batches: int = 4) -> None:
+        self._run_dir = run_dir
+        self._max_batches = max_batches
+        self._n_written = 0
+
+    def on_test_epoch_start(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        """Reset counter at the start of each test epoch."""
+        del trainer, pl_module
+        self._n_written = 0
+        (self._run_dir / "predictions").mkdir(parents=True, exist_ok=True)
+
+    def on_test_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Any,
+        batch: dict[str, Any],
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        """Snapshot inputs, masks, and predictions for the first N batches."""
+        del outputs, trainer, dataloader_idx
+        if self._n_written >= self._max_batches:
+            return
+        import numpy as np
+
+        try:
+            threshold = float(pl_module.training_cfg.threshold)  # type: ignore[attr-defined]
+        except AttributeError:
+            threshold = 0.5
+
+        images = batch["image"].detach().cpu().float().numpy()
+        masks = batch["mask"].detach().cpu().float().numpy()
+        with torch.no_grad():
+            logits = pl_module.model(batch["image"])  # type: ignore[attr-defined]
+        probs = torch.sigmoid(logits.detach()).cpu().float().numpy()
+        preds = (probs >= threshold).astype("uint8")
+
+        out = self._run_dir / "predictions" / f"test_batch_{batch_idx:04d}.npz"
+        np.savez_compressed(
+            out,
+            image=images,
+            mask=masks,
+            prob=probs,
+            pred=preds,
+            subject_id=np.asarray(batch.get("subject_id", []), dtype=object),
+            volume_stratum=np.asarray(batch.get("volume_stratum", []), dtype=object),
+        )
+        self._n_written += 1
+        logger.debug("TestPredictionWriter: wrote %s", out)
 
 
 # ---------------------------------------------------------------------------

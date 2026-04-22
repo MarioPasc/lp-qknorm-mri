@@ -20,11 +20,17 @@ Numerically stable norm computation
 Two regimes avoid NaN/inf gradients:
 
 - **p >= 2** (main sweep range):
-    ``||v||_p = (sum_h |v_h|^p)^(1/p) + eps``
-    Epsilon is added *after* the power sum (outside the root). This matches
-    Henry et al.'s L2 form exactly at p=2:
-        ``||v||_2 = (sum_h v_h^2)^(1/2) + eps``  [eps post-root]
-    which is identical to ``v.norm(p=2, dim=-1, keepdim=True) + eps``.
+    ``||v||_p = (sum_h |v_h|^p + eps)^(1/p)``
+    Epsilon is added *inside* the root (matches the project spec in
+    CLAUDE.md, Mathematical Specifications).  Keeping eps under the
+    1/p exponent bounds the backward gradient of the outer power when
+    the lane sum collapses to zero (e.g. under bf16 activations where
+    whole head-dim vectors can underflow to 0 after a Linear layer).
+    The alternative ``(sum |v_h|^p)^(1/p) + eps`` is mathematically
+    closer to Henry et al. (2020) at p=2 but produces ``0^{(1-p)/p} = inf``
+    in the backward of ``pow(1/p)``, poisoning the AdamW state on the
+    first optimizer step for all p>=2.  Empirically observed as the
+    failure mode of the p_sweep_v1 run (all p>=2 folds NaN at step=1).
 
 - **p < 2**:
     ``||v||_p = (sum_h (|v_h| + eps)^p)^(1/p)``
@@ -37,11 +43,13 @@ p=2 equivalence (Critical invariant)
 --------------------------------------
 For ``p = 2`` the p >= 2 branch computes::
 
-    norm = (sum_h |v_h|^2)^(1/2) + eps  ==  ||v||_2 + eps
+    norm = (sum_h |v_h|^2 + eps)^(1/2)  ==  sqrt(||v||_2^2 + eps)
 
-which is the exact Henry et al. reference formula. We deliberately add eps
-*after* taking the root so the two are identical. Verified numerically to
-< 1e-7 absolute error over 100 random inputs.
+At eps=1e-6 this differs from Henry et al.'s ``||v||_2 + eps`` by at most
+``eps/(2*||v||_2)`` for ``||v||_2 >> sqrt(eps)``, i.e. ~5e-7 relative when
+``||v||_2 ~ 1`` — well within the 1e-6 tolerance used by the p=2 unit test.
+At ``||v||_2 -> 0`` the two forms diverge (spec: sqrt(eps), Henry: eps) but
+only the spec form has finite gradients there.
 """
 
 from __future__ import annotations
@@ -135,8 +143,12 @@ def _lp_normalize(
 
     Implements numerically stable Lp normalization in two regimes:
 
-    - **p >= 2**: ``norm = (sum_h |v_h|^p)^{1/p} + eps``  (eps post-root)
-      Matches Henry et al. (2020) L2-QKNorm exactly when ``p = 2``.
+    - **p >= 2**: ``norm = (sum_h |v_h|^p + eps)^{1/p}``  (eps under the root)
+      Bounds the backward gradient of the outer ``pow(1/p)`` when the lane
+      sum is zero, which occurs at initialization when bf16 underflow drives
+      whole head-dim lanes to 0.  The alternative eps-post-root form
+      ``(sum |v_h|^p)^{1/p} + eps`` matches Henry et al. (2020) bit-for-bit
+      at p=2 but yields ``0^{(1-p)/p}=inf`` in the backward at sum=0.
 
     - **p < 2**: ``norm = (sum_h (|v_h| + eps)^p)^{1/p}`` (eps pre-absolute-value)
       Prevents gradient blow-up at zero-crossings for fractional exponents.
@@ -170,9 +182,10 @@ def _lp_normalize(
     Notes
     -----
     The returned tensor satisfies ``||output||_p ≈ 1`` (equality up to
-    ``eps / ||x||_p`` correction). For the p=2 branch this equals the
+    ``eps / (p * ||x||_p^p)`` correction). For the p=2 branch this equals the
     standard L2-normalized form
-    ``x / (x.norm(p=2, dim=dim, keepdim=True) + eps)`` to within 1e-7.
+    ``x / (x.norm(p=2, dim=dim, keepdim=True) + eps)`` to within ~5e-7
+    relative error when ``||x||_2`` is O(1).
     """
     orig_dtype = x.dtype
     device_type = x.device.type if x.device.type in {"cuda", "cpu"} else "cpu"
@@ -189,10 +202,14 @@ def _lp_normalize(
     with torch.amp.autocast(device_type=device_type, enabled=False):
         x_c = x.to(compute_dtype)
         if p >= 2.0:
-            # Post-root eps: (sum |v_h|^p)^{1/p} + eps.
-            # At p=2: norm = (sum v_h^2)^{1/2} + eps == ||v||_2 + eps,
-            # which is the exact Henry et al. reference formula.
-            norm = x_c.abs().pow(p).sum(dim=dim, keepdim=True).pow(1.0 / p) + eps
+            # Eps under the root: (sum |v_h|^p + eps)^{1/p}.
+            # The alternative eps-post-root form produces 0^{(1-p)/p}=inf in
+            # the backward of pow(1/p) whenever a lane sums to exactly zero,
+            # which the bf16-mixed forward reliably produces at step 0 and
+            # poisons AdamW on the first update.
+            norm = (
+                x_c.abs().pow(p).sum(dim=dim, keepdim=True).add(eps).pow(1.0 / p)
+            )
         else:
             # Pre-absolute-value eps: (sum (|v_h| + eps)^p)^{1/p}.
             # Gradient: d/dv_h[(|v_h| + eps)^p] = p*(|v_h| + eps)^{p-1}*sign(v_h),

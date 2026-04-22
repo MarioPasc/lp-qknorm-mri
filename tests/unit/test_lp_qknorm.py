@@ -175,6 +175,23 @@ class TestLpNormalize:
         out.sum().backward()
         assert not torch.isnan(x.grad).any(), "NaN gradient for near-zero input, p=3.0"
 
+    @pytest.mark.parametrize("p", [2.0, 2.5, 3.0, 4.0])
+    def test_exact_zero_no_nan_gradient_p_ge_2(self, p: float) -> None:
+        """Exact-zero lanes must not produce NaN gradients for p >= 2.
+
+        Regression test for the p_sweep_v1 failure: under bf16-mixed training,
+        a Linear output can underflow an entire head-dim lane to 0.  With the
+        former eps-post-root formulation, ``d/dS (S^{1/p}) = (1/p) S^{(1-p)/p}``
+        evaluates to inf at S=0, poisoning AdamW on the first optimizer step.
+        """
+        x = torch.zeros(2, 4, 8, dtype=torch.float32, requires_grad=True)
+        out = _lp_normalize(x, p=p, eps=1e-6)
+        out.sum().backward()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all(), (
+            f"Non-finite gradient for exact-zero input, p={p}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Monotone norm ordering
@@ -358,22 +375,62 @@ class TestP2Equivalence:
                 msg=f"k_hat mismatch at trial {trial}: LpQKNorm(p=2) != Henry et al. reference",
             )
 
-    def test_p2_equivalence_on_near_zero_vectors(self) -> None:
-        """p=2 equivalence must hold even for near-zero input vectors."""
+    def test_p2_stability_on_near_zero_vectors(self) -> None:
+        """Near-zero inputs must produce finite, bounded output under the
+        eps-inside-root spec form.
+
+        The spec form (||v||_p = (Σ|v_h|^p + ε)^(1/p)) departs from Henry's
+        exact form (||v||_2 + ε) when ||v|| ≪ √ε, because the additive eps
+        lives inside the root. The two forms agree to relative tolerance
+        5×10⁻⁷ for inputs of unit scale (covered by the random-trials test),
+        but diverge when inputs are in the eps regime. This test replaces
+        the old Henry-exact check at near-zero inputs with the properties
+        that actually matter for training stability.
+        """
         eps = 1e-6
         cfg = LpQKNormConfig(p=2.0, eps=eps)
         module = LpQKNorm(cfg)
         module.eval()
 
-        q = torch.zeros(2, 4, 16) + 1e-8
-        k = torch.zeros(2, 4, 16) + 1e-8
+        q = torch.full((2, 4, 16), 1e-8, requires_grad=True)
+        k = torch.full((2, 4, 16), 1e-8, requires_grad=True)
 
         q_hat_ours, k_hat_ours, _ = module(q, k)
-        q_hat_ref = q / (q.norm(p=2, dim=-1, keepdim=True) + eps)
-        k_hat_ref = k / (k.norm(p=2, dim=-1, keepdim=True) + eps)
 
-        torch.testing.assert_close(q_hat_ours, q_hat_ref, atol=1e-5, rtol=0.0)
-        torch.testing.assert_close(k_hat_ours, k_hat_ref, atol=1e-5, rtol=0.0)
+        assert torch.isfinite(q_hat_ours).all()
+        assert torch.isfinite(k_hat_ours).all()
+
+        q_row_norm = q_hat_ours.norm(p=2, dim=-1)
+        k_row_norm = k_hat_ours.norm(p=2, dim=-1)
+        assert (q_row_norm <= 1.0 + 1e-6).all()
+        assert (k_row_norm <= 1.0 + 1e-6).all()
+
+        (q_hat_ours.sum() + k_hat_ours.sum()).backward()
+        assert q.grad is not None and torch.isfinite(q.grad).all()
+        assert k.grad is not None and torch.isfinite(k.grad).all()
+
+    def test_p2_exact_zero_is_finite(self) -> None:
+        """Exact-zero inputs must produce zero output and finite gradients.
+
+        This is the production scenario: bf16 Linear outputs can underflow
+        to exact zero on a whole lane, and the forward + backward must not
+        introduce NaN/Inf. Regression for the p_sweep_v1 failure.
+        """
+        cfg = LpQKNormConfig(p=2.0, eps=1e-6)
+        module = LpQKNorm(cfg)
+        module.eval()
+
+        q = torch.zeros(2, 4, 16, requires_grad=True)
+        k = torch.zeros(2, 4, 16, requires_grad=True)
+
+        q_hat, k_hat, _ = module(q, k)
+
+        torch.testing.assert_close(q_hat, torch.zeros_like(q_hat))
+        torch.testing.assert_close(k_hat, torch.zeros_like(k_hat))
+
+        (q_hat.sum() + k_hat.sum()).backward()
+        assert q.grad is not None and torch.isfinite(q.grad).all()
+        assert k.grad is not None and torch.isfinite(k.grad).all()
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,10 @@ import argparse
 import logging
 from pathlib import Path
 
+import torch.serialization as _serialization
+
 from lpqknorm.data.datamodule import MockAtlasDataModule, MockDataConfig
+from lpqknorm.models.lp_qknorm import LpQKNormConfig
 from lpqknorm.probes import (
     AttentionEntropy,
     AttentionMaskIoU,
@@ -28,7 +31,12 @@ from lpqknorm.probes import (
     SpatialLocalizationError,
     SpectralProbe,
 )
-from lpqknorm.training.module import LpSegmentationModule
+from lpqknorm.training.module import LpSegmentationModule, ModelConfig, TrainingConfig
+
+# PyTorch >= 2.6 defaults torch.load(weights_only=True); LightningModule
+# hparams for LpSegmentationModule include these dataclasses. Allow-list
+# them so load_from_checkpoint succeeds without insecure weights_only=False.
+_serialization.add_safe_globals([ModelConfig, TrainingConfig, LpQKNormConfig])
 
 
 logger = logging.getLogger(__name__)
@@ -60,9 +68,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load model from checkpoint
+    # Load model from checkpoint. strict=False tolerates the optional
+    # loss_fn.bce.pos_weight buffer, which is present only when training
+    # received a DataModule-derived pos_weight and is reconstructed as
+    # None here (probe runs on the model weights alone; the loss fn is
+    # irrelevant).
     module = LpSegmentationModule.load_from_checkpoint(
-        args.checkpoint, map_location=args.device
+        args.checkpoint, map_location=args.device, strict=False
     )
     model = module.model
     model.eval()

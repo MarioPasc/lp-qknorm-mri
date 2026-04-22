@@ -31,17 +31,29 @@ from omegaconf import DictConfig, OmegaConf
 
 from lpqknorm import __version__
 from lpqknorm.models.lp_qknorm import LpQKNormConfig
+# PL checkpoints store the LightningModule hparams (ModelConfig, TrainingConfig,
+# LpQKNormConfig) by value. PyTorch >= 2.6 defaults torch.load(weights_only=True)
+# and refuses to unpickle these dataclasses unless allow-listed. Registering
+# them here lets `trainer.test(ckpt_path=...)` reload the best checkpoint
+# without resorting to the insecure weights_only=False.
+import torch.serialization as _serialization
+
+from lpqknorm.training.module import ModelConfig, TrainingConfig
 from lpqknorm.training.callbacks import (
+    AlphaLogger,
     ArtefactDirectoryCallback,
     AttentionSummaryCallback,
     GradientNormCallback,
     ManifestCallback,
     PerPatientMetricsCallback,
+    TestPredictionWriter,
 )
 from lpqknorm.training.logging import StructuredLogger
-from lpqknorm.training.module import LpSegmentationModule, ModelConfig, TrainingConfig
+from lpqknorm.training.module import LpSegmentationModule
 from lpqknorm.utils.git import capture_git_state
 from lpqknorm.utils.seeding import set_global_seed
+
+_serialization.add_safe_globals([ModelConfig, TrainingConfig, LpQKNormConfig])
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +127,7 @@ def main(cfg: DictConfig) -> None:
             fold=cfg.data.fold,
             batch_size=cfg.training.batch_size,
             num_workers=cfg.training.num_workers,
+            augment=bool(cfg.data.get("augment", False)),
         )
     dm.setup("fit")
 
@@ -182,8 +195,11 @@ def main(cfg: DictConfig) -> None:
     gpu_model = "N/A"
     cuda_version = "N/A"
     if torch.cuda.is_available():
-        gpu_model = torch.cuda.get_device_name(0)
-        cuda_version = torch.version.cuda or "N/A"
+        try:
+            gpu_model = torch.cuda.get_device_name(0)
+            cuda_version = torch.version.cuda or "N/A"
+        except RuntimeError as exc:  # old driver despite is_available()==True
+            logger.warning("torch.cuda init failed: %s; proceeding on CPU.", exc)
 
     # Init-spec hash: isolates the weight-initialization fields so the
     # Manifest can assert byte-equality across runs grouped by experiment.
@@ -247,6 +263,7 @@ def main(cfg: DictConfig) -> None:
             log_every_n_steps=cfg.training.gradient_log_every_n_steps,
         ),
         AttentionSummaryCallback(run_dir, seed=seed),
+        TestPredictionWriter(run_dir, max_batches=4),
         pl.callbacks.ModelCheckpoint(
             dirpath=ckpt_dir,
             filename="last",
@@ -274,6 +291,17 @@ def main(cfg: DictConfig) -> None:
             verbose=True,
         ),
     ]
+    # AlphaLogger writes probes/alpha_trajectory.jsonl per training step.
+    # Vanilla baseline has no LpQKNorm, so skip it there to avoid noisy
+    # per-step AttributeError traces.
+    if cfg.model.p is not None:
+        callbacks.append(
+            AlphaLogger(
+                run_dir=run_dir,
+                p_value=float(cfg.model.p),
+                fold=int(cfg.data.fold),
+            )
+        )
 
     # --- Trainer ---
     precision = training_cfg.precision if torch.cuda.is_available() else "32"
@@ -302,7 +330,37 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer.fit(module, dm)
-    trainer.test(module, dm)
+
+    # Test on the best-val-dice checkpoint, not the last-epoch weights.
+    # The best_val_dice ModelCheckpoint is the second callback of that class;
+    # grab it explicitly so `ckpt_path="best"` ambiguity (multiple monitored
+    # ModelCheckpoints) cannot pick the wrong file.
+    best_val_dice_cb: pl.callbacks.ModelCheckpoint | None = next(
+        (
+            cb
+            for cb in callbacks
+            if isinstance(cb, pl.callbacks.ModelCheckpoint)
+            and cb.monitor == "val_dice_mean"
+        ),
+        None,
+    )
+    best_path = (
+        best_val_dice_cb.best_model_path
+        if best_val_dice_cb is not None
+        else ""
+    )
+    if best_path and Path(best_path).exists():
+        logger.info("Running test() on best-val-dice checkpoint: %s", best_path)
+        trainer.test(module, dm, ckpt_path=best_path)
+    else:
+        logger.warning(
+            "No best-val-dice checkpoint on disk (best_path=%r); "
+            "falling back to in-memory weights. This is expected under "
+            "limit_train_batches smoke tests.",
+            best_path,
+        )
+        trainer.test(module, dm)
+
     s_logger.close()
     logger.info("Training complete. Artefacts at %s", run_dir)
 
