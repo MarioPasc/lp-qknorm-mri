@@ -164,9 +164,65 @@ print(f"[map] wrote {('${MAP_FILE}')}")
 PY
 
 # -----------------------------------------------------------------------------
+# Identify which tasks need (re-)submission.
+#
+# A task is SKIPPED when its manifest.json has "finished_utc" set (training
+# completed successfully).  Tasks with no manifest, or with finished_utc=null,
+# are submitted — the worker's resume logic picks up from last.ckpt if one
+# exists.
+# -----------------------------------------------------------------------------
+PENDING_TASKS="$(python - <<PY
+import json, pathlib
+
+run_dir   = pathlib.Path("${RUN_DIR}")
+seed      = "${SEED}"
+p_values  = "${P_VALUES}".split()
+n_folds   = int("${N_FOLDS}")
+
+pending = []
+skipped = []
+for p_idx, p in enumerate(p_values):
+    for fold in range(n_folds):
+        tid = p_idx * n_folds + fold
+        p_label = "vanilla" if p == "vanilla" else p
+        manifest = run_dir / f"p={p_label}" / f"fold={fold}" / f"seed={seed}" / "manifest.json"
+        if manifest.exists():
+            data = json.loads(manifest.read_text())
+            if data.get("finished_utc") is not None:
+                skipped.append((tid, p, fold))
+                continue
+        pending.append((tid, p, fold))
+
+for tid, p, fold in skipped:
+    print(f"[skip] task {tid:>2d}  p={p}  fold={fold}  (completed)", flush=True)
+for tid, p, fold in pending:
+    print(f"[submit] task {tid:>2d}  p={p}  fold={fold}", flush=True)
+
+# Print the comma-separated task list on the last line (parsed by bash).
+print(",".join(str(t[0]) for t in pending))
+PY
+)"
+
+# The last line of PENDING_TASKS is the comma-separated array spec.
+ARRAY_SPEC="$(printf '%s\n' "${PENDING_TASKS}" | tail -1)"
+# Everything before the last line is the human-readable status report.
+printf '%s\n' "${PENDING_TASKS}" | head -n -1
+echo ""
+
+if [ -z "${ARRAY_SPEC}" ]; then
+    echo "=========================================="
+    echo "ALL RUNS COMPLETED — nothing to submit."
+    echo "=========================================="
+    exit 0
+fi
+
+N_PENDING="$(echo "${ARRAY_SPEC}" | tr ',' '\n' | wc -l)"
+echo "Pending: ${N_PENDING} / ${N_TASKS} tasks"
+echo ""
+
+# -----------------------------------------------------------------------------
 # Submit array job.
 # -----------------------------------------------------------------------------
-ARRAY_MAX=$(( N_TASKS - 1 ))
 JOB_NAME="lpqk_${EXPERIMENT_NAME}"
 
 # Build sbatch args.  --partition, --constraint, --export are only added
@@ -177,7 +233,7 @@ JOB_NAME="lpqk_${EXPERIMENT_NAME}"
 # earlier `export` block, and (b) P_VALUES contains spaces, which would
 # be ambiguous inside a comma-separated --export= value.
 SBATCH_ARGS=(
-    --array="0-${ARRAY_MAX}"
+    --array="${ARRAY_SPEC}"
     --job-name="${JOB_NAME}"
     --gres="${SLURM_GRES}"
     --cpus-per-task="${SLURM_CPUS}"
@@ -280,7 +336,8 @@ echo ""
 echo "=========================================="
 echo "SUBMITTED"
 echo "=========================================="
-echo "Job ID:   ${JOB_ID}  (array 0-${ARRAY_MAX})"
+echo "Job ID:   ${JOB_ID}  (tasks: ${ARRAY_SPEC})"
+echo "Pending:  ${N_PENDING} / ${N_TASKS} tasks"
 echo "Map:      ${MAP_FILE}"
 echo "Logs:     ${SLURM_LOG_DIR}"
 echo ""
