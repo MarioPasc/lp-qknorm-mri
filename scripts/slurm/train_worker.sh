@@ -140,6 +140,16 @@ export PYTHONUNBUFFERED=1
 # on A100 40 GB, where the caching allocator tends to leave a few GB
 # reserved-but-unallocated after the first high-water mark.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+# Forward SIGTERM (sent by SLURM before SIGKILL on timeout) to the Python
+# child so Lightning can trigger a graceful shutdown and flush callbacks.
+TRAIN_PID=""
+_fwd_sigterm() {
+    echo "[signal] SIGTERM received — forwarding to training PID=${TRAIN_PID}"
+    [ -n "${TRAIN_PID}" ] && kill -TERM "${TRAIN_PID}" 2>/dev/null
+}
+trap _fwd_sigterm SIGTERM
+
 set +e
 python -u -m lpqknorm.cli.train \
     experiment="${EXPERIMENT_NAME}" \
@@ -155,7 +165,9 @@ python -u -m lpqknorm.cli.train \
     training.accumulate_grad_batches="${ACCUMULATE_GRAD_BATCHES:-1}" \
     model.use_checkpoint="${USE_CHECKPOINT:-false}" \
     hydra.run.dir="${HYDRA_DIR}" \
-    2>&1
+    2>&1 &
+TRAIN_PID=$!
+wait "${TRAIN_PID}" 2>/dev/null
 TRAIN_RC=$?
 set -e
 

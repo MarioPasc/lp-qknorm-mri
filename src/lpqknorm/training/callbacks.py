@@ -171,7 +171,11 @@ class ArtefactDirectoryCallback(pl.Callback):
 
 
 class ManifestCallback(pl.Callback):
-    """Write and update ``manifest.json`` at start and end of training.
+    """Write and update ``manifest.json`` at start, each val epoch, and end.
+
+    The manifest is flushed after every validation epoch so that SLURM
+    timeouts leave a usable record of training progress (epoch count,
+    best metrics, wall time).
 
     Parameters
     ----------
@@ -182,43 +186,75 @@ class ManifestCallback(pl.Callback):
         git_*, config_hash, split_hash, n_train, n_val, n_test, host,
         gpu_model, cuda_version, torch_version, monai_version,
         lpqknorm_version).
+    resuming : bool
+        If ``True``, preserve the existing manifest (started_utc, best
+        metrics) and accumulate wall time from the prior segment.
     """
 
-    def __init__(self, run_dir: Path, manifest_init: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        manifest_init: dict[str, Any],
+        resuming: bool = False,
+    ) -> None:
         self._run_dir = run_dir
         self._manifest_init = manifest_init
         self._start_time: float = 0.0
         self._manifest_path = run_dir / "manifest.json"
+        self._resuming = resuming
+        self._walltime_offset: float = 0.0
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Write initial manifest with started_utc."""
+        """Write initial manifest or preserve existing one on resume."""
         self._start_time = time.monotonic()
-        init = {
-            **self._manifest_init,
-            "started_utc": datetime.datetime.now(tz=datetime.UTC)
-            .isoformat()
-            .replace("+00:00", "Z"),
-            "finished_utc": None,
-            "walltime_sec": None,
-            "peak_gpu_memory_mb": None,
-            "final_epoch": None,
-            "best_val_dice": None,
-            "best_small_recall": None,
-        }
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        self._manifest_path.write_text(json.dumps(init, indent=2))
-        logger.info(
-            "ManifestCallback: wrote initial manifest to %s",
-            self._manifest_path,
-        )
+        if self._resuming and self._manifest_path.exists():
+            data = json.loads(self._manifest_path.read_text())
+            self._walltime_offset = data.get("walltime_sec") or 0.0
+            logger.info(
+                "ManifestCallback: resuming (prior walltime=%.1fs), "
+                "preserving manifest at %s",
+                self._walltime_offset,
+                self._manifest_path,
+            )
+        else:
+            init = {
+                **self._manifest_init,
+                "started_utc": datetime.datetime.now(tz=datetime.UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "finished_utc": None,
+                "walltime_sec": None,
+                "peak_gpu_memory_mb": None,
+                "final_epoch": None,
+                "best_val_dice": None,
+                "best_small_recall": None,
+            }
+            self._run_dir.mkdir(parents=True, exist_ok=True)
+            self._manifest_path.write_text(json.dumps(init, indent=2))
+            logger.info(
+                "ManifestCallback: wrote initial manifest to %s",
+                self._manifest_path,
+            )
+
+    def on_validation_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        """Flush intermediate progress so SLURM kills leave usable state."""
+        self._flush_manifest(trainer)
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Update manifest with final metrics and timing."""
-        elapsed = time.monotonic() - self._start_time
-        data = json.loads(self._manifest_path.read_text())
+        """Update manifest with final metrics, timing, and finished timestamp."""
+        data = self._flush_manifest(trainer)
         data["finished_utc"] = (
             datetime.datetime.now(tz=datetime.UTC).isoformat().replace("+00:00", "Z")
         )
+        self._manifest_path.write_text(json.dumps(data, indent=2))
+        logger.info("ManifestCallback: updated final manifest.")
+
+    def _flush_manifest(self, trainer: pl.Trainer) -> dict[str, Any]:
+        """Read, update, write manifest with current training progress."""
+        data: dict[str, Any] = json.loads(self._manifest_path.read_text())
+        elapsed = time.monotonic() - self._start_time + self._walltime_offset
         data["walltime_sec"] = round(elapsed, 2)
         data["final_epoch"] = trainer.current_epoch
         if torch.cuda.is_available():
@@ -226,12 +262,28 @@ class ManifestCallback(pl.Callback):
                 torch.cuda.max_memory_allocated() / 1024**2, 2
             )
         cb_metrics = trainer.callback_metrics
-        data["best_val_dice"] = float(cb_metrics.get("val_dice_mean", math.nan))
-        data["best_small_recall"] = float(
-            cb_metrics.get("val_lesion_recall_small", math.nan)
-        )
+        val_dice = cb_metrics.get("val_dice_mean")
+        if val_dice is not None:
+            current = float(val_dice)
+            prev = data.get("best_val_dice")
+            if not math.isnan(current) and (
+                prev is None
+                or (isinstance(prev, float) and math.isnan(prev))
+                or current > prev
+            ):
+                data["best_val_dice"] = current
+        val_recall = cb_metrics.get("val_lesion_recall_small")
+        if val_recall is not None:
+            current = float(val_recall)
+            prev = data.get("best_small_recall")
+            if not math.isnan(current) and (
+                prev is None
+                or (isinstance(prev, float) and math.isnan(prev))
+                or current > prev
+            ):
+                data["best_small_recall"] = current
         self._manifest_path.write_text(json.dumps(data, indent=2))
-        logger.info("ManifestCallback: updated final manifest.")
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +767,7 @@ class AlphaLogger(pl.Callback):
         blocks: tuple[int, ...] = (0, 1),
         p_value: float = 2.0,
         fold: int = 0,
+        resuming: bool = False,
     ) -> None:
         self._run_dir = run_dir
         self._stage = stage
@@ -722,11 +775,13 @@ class AlphaLogger(pl.Callback):
         self._p = p_value
         self._fold = fold
         self._path = run_dir / "probes" / "alpha_trajectory.jsonl"
+        self._resuming = resuming
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Create the output file (truncating any previous content)."""
+        """Create or append to the trajectory file."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text("")
+        if not self._resuming:
+            self._path.write_text("")
         logger.info("AlphaLogger: initialised trajectory at %s", self._path)
 
     def on_train_batch_end(

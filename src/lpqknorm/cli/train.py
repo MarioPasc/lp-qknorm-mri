@@ -27,18 +27,17 @@ import hydra
 import monai
 import pytorch_lightning as pl
 import torch
-from omegaconf import DictConfig, OmegaConf
 
-from lpqknorm import __version__
-from lpqknorm.models.lp_qknorm import LpQKNormConfig
 # PL checkpoints store the LightningModule hparams (ModelConfig, TrainingConfig,
 # LpQKNormConfig) by value. PyTorch >= 2.6 defaults torch.load(weights_only=True)
 # and refuses to unpickle these dataclasses unless allow-listed. Registering
 # them here lets `trainer.test(ckpt_path=...)` reload the best checkpoint
 # without resorting to the insecure weights_only=False.
 import torch.serialization as _serialization
+from omegaconf import DictConfig, OmegaConf
 
-from lpqknorm.training.module import ModelConfig, TrainingConfig
+from lpqknorm import __version__
+from lpqknorm.models.lp_qknorm import LpQKNormConfig
 from lpqknorm.training.callbacks import (
     AlphaLogger,
     ArtefactDirectoryCallback,
@@ -49,9 +48,10 @@ from lpqknorm.training.callbacks import (
     TestPredictionWriter,
 )
 from lpqknorm.training.logging import StructuredLogger
-from lpqknorm.training.module import LpSegmentationModule
+from lpqknorm.training.module import LpSegmentationModule, ModelConfig, TrainingConfig
 from lpqknorm.utils.git import capture_git_state
 from lpqknorm.utils.seeding import set_global_seed
+
 
 _serialization.add_safe_globals([ModelConfig, TrainingConfig, LpQKNormConfig])
 
@@ -243,6 +243,23 @@ def main(cfg: DictConfig) -> None:
         "init_spec_hash": init_spec_hash,
     }
 
+    # --- Resume detection ---
+    resume_ckpt: str | None = None
+    resuming = False
+    last_ckpt = run_dir / "checkpoints" / "last.ckpt"
+    if last_ckpt.exists():
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            prior = json.loads(manifest_path.read_text())
+            if prior.get("finished_utc") is None:
+                resume_ckpt = str(last_ckpt)
+                resuming = True
+                logger.info(
+                    "Incomplete run detected (finished_utc=null). "
+                    "Resuming from checkpoint: %s",
+                    resume_ckpt,
+                )
+
     # --- LightningModule ---
     module = LpSegmentationModule(
         model_cfg=model_cfg,
@@ -256,7 +273,7 @@ def main(cfg: DictConfig) -> None:
     ckpt_dir = str(run_dir / "checkpoints")
     callbacks: list[pl.Callback] = [
         ArtefactDirectoryCallback(run_dir),
-        ManifestCallback(run_dir, manifest_init),
+        ManifestCallback(run_dir, manifest_init, resuming=resuming),
         PerPatientMetricsCallback(s_logger),
         GradientNormCallback(
             run_dir,
@@ -300,6 +317,7 @@ def main(cfg: DictConfig) -> None:
                 run_dir=run_dir,
                 p_value=float(cfg.model.p),
                 fold=int(cfg.data.fold),
+                resuming=resuming,
             )
         )
 
@@ -329,7 +347,7 @@ def main(cfg: DictConfig) -> None:
         limit_val_batches=limit_val_batches,
     )
 
-    trainer.fit(module, dm)
+    trainer.fit(module, dm, ckpt_path=resume_ckpt)
 
     # Test on the best-val-dice checkpoint, not the last-epoch weights.
     # The best_val_dice ModelCheckpoint is the second callback of that class;
@@ -344,11 +362,7 @@ def main(cfg: DictConfig) -> None:
         ),
         None,
     )
-    best_path = (
-        best_val_dice_cb.best_model_path
-        if best_val_dice_cb is not None
-        else ""
-    )
+    best_path = best_val_dice_cb.best_model_path if best_val_dice_cb is not None else ""
     if best_path and Path(best_path).exists():
         logger.info("Running test() on best-val-dice checkpoint: %s", best_path)
         trainer.test(module, dm, ckpt_path=best_path)
