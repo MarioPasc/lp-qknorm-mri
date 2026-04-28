@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from lpqknorm.analysis.aggregation import (
     load_per_patient,
+    load_probe_summaries,
     load_probes,
     load_runs,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "hedges_g",
     "holm_bonferroni",
     "load_per_patient",
+    "load_probe_summaries",
     "load_probes",
     "load_runs",
     "paired_cohen_d",
